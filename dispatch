@@ -4,7 +4,7 @@ set -euo pipefail
 # dispatch — Orchestrate Claude Code agents in git worktrees
 # https://github.com/paperMoose/dispatch
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 DISPATCH_SESSION="dispatch"
 WORKTREE_DIR=".worktrees"
 
@@ -212,6 +212,47 @@ create_window() {
 }
 
 # ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+notify() {
+    local title="$1"
+    local message="$2"
+
+    # macOS native notification (no dependencies)
+    if command -v osascript &>/dev/null; then
+        osascript -e "display notification \"$message\" with title \"$title\" sound name \"Glass\"" 2>/dev/null || true
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Claude Code readiness
+# ---------------------------------------------------------------------------
+wait_for_claude() {
+    local target="$1"
+    local max_wait=15
+    local waited=0
+
+    while (( waited < max_wait )); do
+        # Capture the last few lines of the pane
+        local pane_content
+        pane_content=$(tmux capture-pane -t "$target" -p -S -5 2>/dev/null || true)
+
+        # Claude Code shows ">" prompt or "?" prompt when ready
+        # Also check for common ready indicators
+        if echo "$pane_content" | grep -qE '^\s*[>?]\s*$|╭|Welcome|claude'; then
+            return 0
+        fi
+
+        sleep 1
+        (( waited++ ))
+    done
+
+    # Timed out — proceed anyway (best effort)
+    log_warn "Claude Code may not be fully initialized (waited ${max_wait}s)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Linear integration
 # ---------------------------------------------------------------------------
 fetch_linear_ticket() {
@@ -303,53 +344,19 @@ build_claude_cmd() {
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
-cmd_run() {
-    local input=""
-    local headless=false
-    local model=""
-    local max_turns=""
-    local max_budget=""
-    local base_branch=""
-    local prompt_file=""
-    local extra_args=""
-    local skip_worktree=false
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --headless|-H)      headless=true; shift ;;
-            --model|-m)         DISPATCH_MODEL="$2"; shift 2 ;;
-            --max-turns)        DISPATCH_MAX_TURNS="$2"; shift 2 ;;
-            --max-budget)       DISPATCH_MAX_BUDGET="$2"; shift 2 ;;
-            --base|-b)          DISPATCH_BASE_BRANCH="$2"; shift 2 ;;
-            --prompt-file|-f)   prompt_file="$2"; shift 2 ;;
-            --no-worktree)      skip_worktree=true; shift ;;
-            --*)                extra_args="$extra_args $1"; shift ;;
-            *)                  input="$1"; shift ;;
-        esac
-    done
-
-    if [[ -z "$input" && -z "$prompt_file" ]]; then
-        log_error "Usage: dispatch run <ticket-id|prompt> [options]"
-        echo ""
-        echo "  dispatch run HEY-837                    # from Linear ticket"
-        echo "  dispatch run HEY-837 --headless         # run in background"
-        echo "  dispatch run \"Fix the auth bug\"         # free text prompt"
-        echo "  dispatch run HEY-837 --model sonnet     # specific model"
-        echo "  dispatch run HEY-837 --max-turns 10     # limit turns"
-        echo "  dispatch run HEY-837 --base main        # branch off main"
-        exit 1
-    fi
-
-    ensure_tmux
+_launch_agent() {
+    local input="$1"
+    local headless="$2"
+    local extra_args="$3"
+    local skip_worktree="$4"
+    local prompt_file_arg="$5"
 
     # Determine if input is a ticket ID or free text
     local id=""
     local prompt=""
     local branch=""
-    local is_ticket=false
 
     if [[ "$input" =~ ^[A-Z]+-[0-9]+$ ]]; then
-        is_ticket=true
         id=$(echo "$input" | tr '[:upper:]' '[:lower:]')
         branch="${id}"
 
@@ -381,18 +388,18 @@ Work on this ticket. Create commits as you go. When done, push the branch."
     fi
 
     # Load prompt from file if specified
-    if [[ -n "$prompt_file" ]]; then
-        if [[ ! -f "$prompt_file" ]]; then
-            log_error "Prompt file not found: $prompt_file"
-            exit 1
+    if [[ -n "$prompt_file_arg" ]]; then
+        if [[ ! -f "$prompt_file_arg" ]]; then
+            log_error "Prompt file not found: $prompt_file_arg"
+            return 1
         fi
-        prompt=$(cat "$prompt_file")
+        prompt=$(cat "$prompt_file_arg")
     fi
 
     # Check if already running
     if window_exists "$id"; then
         log_error "Agent '$id' is already running. Use 'dispatch stop $id' first."
-        exit 1
+        return 1
     fi
 
     # Create worktree
@@ -409,24 +416,27 @@ Work on this ticket. Create commits as you go. When done, push the branch."
 
     # Build and send the Claude command
     local mode="interactive"
-    if [[ "$headless" == true ]]; then
-        mode="headless"
-    fi
+    [[ "$headless" == true ]] && mode="headless"
 
     local claude_cmd
     claude_cmd=$(build_claude_cmd "$prompt" "$mode" "$wt_path" "$extra_args")
 
     if [[ "$mode" == "interactive" ]]; then
-        # Interactive: launch claude, then type the initial prompt
-        tmux send-keys -t "$DISPATCH_SESSION:$id" "claude" Enter
-        sleep 2  # Wait for Claude Code to initialize
-        # Send the prompt as the first message
-        tmux send-keys -t "$DISPATCH_SESSION:$id" "$prompt"
+        # Interactive: launch claude, wait for it to be ready, then send prompt
+        local model_flag=""
+        [[ -n "$DISPATCH_MODEL" ]] && model_flag="--model $DISPATCH_MODEL"
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "claude $model_flag" Enter
+        wait_for_claude "$DISPATCH_SESSION:$id"
+        # Write prompt to file and paste via tmux load-buffer to handle special chars
+        local pf="$wt_path/.dispatch-prompt.txt"
+        printf '%s' "$prompt" > "$pf"
+        tmux load-buffer "$pf"
+        tmux paste-buffer -t "$DISPATCH_SESSION:$id"
         tmux send-keys -t "$DISPATCH_SESSION:$id" Enter
     else
-        # Headless: run with -p flag, tee to log
+        # Headless: run with -p flag, tee to log, notify on completion
         local log_file="$wt_path/.dispatch.log"
-        tmux send-keys -t "$DISPATCH_SESSION:$id" "$claude_cmd 2>&1 | tee $log_file" Enter
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "$claude_cmd 2>&1 | tee $log_file; dispatch _notify-done $id" Enter
     fi
 
     echo ""
@@ -437,19 +447,69 @@ Work on this ticket. Create commits as you go. When done, push the branch."
         log_dim "  Logs:     dispatch logs $id"
         log_dim "  Stop:     dispatch stop $id"
     fi
+}
+
+cmd_run() {
+    local inputs=()
+    local headless=false
+    local prompt_file=""
+    local extra_args=""
+    local skip_worktree=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --headless|-H)      headless=true; shift ;;
+            --model|-m)         DISPATCH_MODEL="$2"; shift 2 ;;
+            --max-turns)        DISPATCH_MAX_TURNS="$2"; shift 2 ;;
+            --max-budget)       DISPATCH_MAX_BUDGET="$2"; shift 2 ;;
+            --base|-b)          DISPATCH_BASE_BRANCH="$2"; shift 2 ;;
+            --prompt-file|-f)   prompt_file="$2"; shift 2 ;;
+            --no-worktree)      skip_worktree=true; shift ;;
+            --*)                extra_args="$extra_args $1"; shift ;;
+            *)                  inputs+=("$1"); shift ;;
+        esac
+    done
+
+    if [[ ${#inputs[@]} -eq 0 && -z "$prompt_file" ]]; then
+        log_error "Usage: dispatch run <ticket|prompt> [ticket2 ...] [options]"
+        echo ""
+        echo "  dispatch run HEY-837                         # from Linear ticket"
+        echo "  dispatch run HEY-837 HEY-838 HEY-839        # batch launch"
+        echo "  dispatch run HEY-837 --headless              # run in background"
+        echo "  dispatch run \"Fix the auth bug\"               # free text prompt"
+        echo "  dispatch run HEY-837 --model sonnet          # specific model"
+        echo "  dispatch run HEY-837 --max-turns 10          # limit turns"
+        echo "  dispatch run HEY-837 --base main             # branch off main"
+        exit 1
+    fi
+
+    ensure_tmux
+
+    local batch=$(( ${#inputs[@]} > 1 ? 1 : 0 ))
+
+    if (( batch )); then
+        log_info "Batch launching ${#inputs[@]} agents..."
+        echo ""
+    fi
+
+    for input in "${inputs[@]}"; do
+        _launch_agent "$input" "$headless" "$extra_args" "$skip_worktree" "$prompt_file"
+    done
+
     echo ""
 
-    # If interactive and not headless, attach to the session
-    if [[ "$headless" == false ]]; then
+    # For single interactive agent, attach to session
+    if [[ "$headless" == false && ${#inputs[@]} -eq 1 ]]; then
         log_info "Attaching to tmux session..."
         log_dim "  Detach with: Ctrl-B then D"
         echo ""
-        # Use iTerm2 integration if available, otherwise regular attach
         if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
             tmux -CC attach -t "$DISPATCH_SESSION"
         else
             tmux attach -t "$DISPATCH_SESSION"
         fi
+    elif (( batch )); then
+        log_ok "All agents launched. Use ${BOLD}dispatch attach${NC} to view tabs."
     fi
 }
 
@@ -662,13 +722,13 @@ cmd_help() {
 dispatch — Orchestrate Claude Code agents in git worktrees
 
 Usage:
-  dispatch run <ticket|prompt> [options]    Launch an agent
-  dispatch list                             Show running agents
-  dispatch logs <id>                        Tail agent output
-  dispatch stop <id>                        Stop an agent
-  dispatch resume <id> [--headless]         Resume a stopped agent
-  dispatch cleanup <id> | --all             Remove worktree(s)
-  dispatch attach                           Attach to tmux session
+  dispatch run <ticket|prompt> [more...] [options]  Launch agent(s)
+  dispatch list                                     Show running agents
+  dispatch logs <id>                                Tail agent output
+  dispatch stop <id>                                Stop an agent
+  dispatch resume <id> [--headless]                 Resume a stopped agent
+  dispatch cleanup <id> | --all                     Remove worktree(s)
+  dispatch attach                                   Attach to tmux session
 
 Run Options:
   --headless, -H          Run in background (no interactive tab)
@@ -682,6 +742,7 @@ Run Options:
 Examples:
   dispatch run HEY-837                      Interactive, from Linear ticket
   dispatch run HEY-837 --headless           Background mode
+  dispatch run HEY-837 HEY-838 HEY-839     Batch launch (multiple agents)
   dispatch run "Fix the auth bug"           Free text prompt
   dispatch run HEY-837 -m sonnet            Use Sonnet model
   dispatch run HEY-837 --max-turns 10       Limit to 10 turns
@@ -718,6 +779,12 @@ main() {
         resume)     cmd_resume "$@" ;;
         cleanup)    cmd_cleanup "$@" ;;
         attach)     cmd_attach ;;
+        _notify-done)
+            # Internal: called by headless agents when they complete
+            local agent_id="${1:-unknown}"
+            notify "Dispatch" "Agent $agent_id finished"
+            log_ok "Agent $agent_id completed"
+            ;;
         version|-v|--version) cmd_version ;;
         help|-h|--help)       cmd_help ;;
         *)
