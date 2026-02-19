@@ -33,30 +33,50 @@ log_dim()   { echo -e "${DIM}$*${NC}"; }
 # Configuration
 # ---------------------------------------------------------------------------
 DISPATCH_CONFIG="${DISPATCH_CONFIG:-$HOME/.dispatch.yml}"
-DISPATCH_BASE_BRANCH="${DISPATCH_BASE_BRANCH:-dev}"
-DISPATCH_MODEL="${DISPATCH_MODEL:-}"
-DISPATCH_MAX_TURNS="${DISPATCH_MAX_TURNS:-}"
-DISPATCH_MAX_BUDGET="${DISPATCH_MAX_BUDGET:-}"
-DISPATCH_ALLOWED_TOOLS="${DISPATCH_ALLOWED_TOOLS:-Bash,Read,Write,Edit,Glob,Grep,Task,WebSearch,WebFetch}"
+
+# Capture env vars set by user (before defaults)
+_ENV_BASE_BRANCH="${DISPATCH_BASE_BRANCH:-}"
+_ENV_MODEL="${DISPATCH_MODEL:-}"
+_ENV_MAX_TURNS="${DISPATCH_MAX_TURNS:-}"
+_ENV_MAX_BUDGET="${DISPATCH_MAX_BUDGET:-}"
+_ENV_ALLOWED_TOOLS="${DISPATCH_ALLOWED_TOOLS:-}"
+
+# Initialize with empty — config file and then defaults fill these in
+DISPATCH_BASE_BRANCH=""
+DISPATCH_MODEL=""
+DISPATCH_MAX_TURNS=""
+DISPATCH_MAX_BUDGET=""
+DISPATCH_ALLOWED_TOOLS=""
 
 load_config() {
+    # 1. Load config file values
     if [[ -f "$DISPATCH_CONFIG" ]]; then
-        # Simple YAML parsing for flat keys
         while IFS=': ' read -r key value; do
             [[ "$key" =~ ^#.*$ ]] && continue
             [[ -z "$key" ]] && continue
             value="${value%\"}"
             value="${value#\"}"
             case "$key" in
-                base_branch)    DISPATCH_BASE_BRANCH="${DISPATCH_BASE_BRANCH:-$value}" ;;
-                model)          DISPATCH_MODEL="${DISPATCH_MODEL:-$value}" ;;
-                max_turns)      DISPATCH_MAX_TURNS="${DISPATCH_MAX_TURNS:-$value}" ;;
-                max_budget)     DISPATCH_MAX_BUDGET="${DISPATCH_MAX_BUDGET:-$value}" ;;
-                allowed_tools)  DISPATCH_ALLOWED_TOOLS="${DISPATCH_ALLOWED_TOOLS:-$value}" ;;
-                worktree_dir)   WORKTREE_DIR="${value}" ;;
+                base_branch)    DISPATCH_BASE_BRANCH="$value" ;;
+                model)          DISPATCH_MODEL="$value" ;;
+                max_turns)      DISPATCH_MAX_TURNS="$value" ;;
+                max_budget)     DISPATCH_MAX_BUDGET="$value" ;;
+                allowed_tools)  DISPATCH_ALLOWED_TOOLS="$value" ;;
+                worktree_dir)   WORKTREE_DIR="$value" ;;
             esac
         done < "$DISPATCH_CONFIG"
     fi
+
+    # 2. Env vars override config file (user's explicit env takes precedence)
+    [[ -n "$_ENV_BASE_BRANCH" ]] && DISPATCH_BASE_BRANCH="$_ENV_BASE_BRANCH"
+    [[ -n "$_ENV_MODEL" ]] && DISPATCH_MODEL="$_ENV_MODEL"
+    [[ -n "$_ENV_MAX_TURNS" ]] && DISPATCH_MAX_TURNS="$_ENV_MAX_TURNS"
+    [[ -n "$_ENV_MAX_BUDGET" ]] && DISPATCH_MAX_BUDGET="$_ENV_MAX_BUDGET"
+    [[ -n "$_ENV_ALLOWED_TOOLS" ]] && DISPATCH_ALLOWED_TOOLS="$_ENV_ALLOWED_TOOLS"
+
+    # 3. Apply defaults for anything still unset
+    DISPATCH_BASE_BRANCH="${DISPATCH_BASE_BRANCH:-dev}"
+    DISPATCH_ALLOWED_TOOLS="${DISPATCH_ALLOWED_TOOLS:-Bash,Read,Write,Edit,Glob,Grep,Task,WebSearch,WebFetch}"
 }
 
 # ---------------------------------------------------------------------------
@@ -148,9 +168,9 @@ ensure_tmux() {
 
 ensure_session() {
     if ! tmux has-session -t "$DISPATCH_SESSION" 2>/dev/null; then
-        tmux new-session -d -s "$DISPATCH_SESSION" -n "conductor"
+        tmux new-session -d -s "$DISPATCH_SESSION" -n "dispatch"
         # Mark the initial window so we can identify it
-        tmux send-keys -t "$DISPATCH_SESSION:conductor" "# Conductor control window" Enter
+        tmux send-keys -t "$DISPATCH_SESSION:dispatch" "# Dispatch control window" Enter
     fi
 }
 
@@ -239,7 +259,8 @@ fetch_linear_ticket() {
 build_claude_cmd() {
     local prompt="$1"
     local mode="$2"  # interactive or headless
-    local extra_args="${3:-}"
+    local wt_path="$3"
+    local extra_args="${4:-}"
 
     local cmd="claude"
 
@@ -269,10 +290,11 @@ build_claude_cmd() {
         cmd="$cmd $extra_args"
     fi
 
-    # For interactive mode, we just launch claude with the initial message
-    # For headless, the prompt is part of -p
+    # For headless, write prompt to a file to avoid shell quoting issues
     if [[ "$mode" == "headless" ]]; then
-        cmd="$cmd \"$(echo "$prompt" | sed 's/"/\\"/g')\""
+        local prompt_file="$wt_path/.dispatch-prompt.txt"
+        printf '%s' "$prompt" > "$prompt_file"
+        cmd="$cmd \"\$(cat '$prompt_file')\""
     fi
 
     echo "$cmd"
@@ -392,7 +414,7 @@ Work on this ticket. Create commits as you go. When done, push the branch."
     fi
 
     local claude_cmd
-    claude_cmd=$(build_claude_cmd "$prompt" "$mode" "$extra_args")
+    claude_cmd=$(build_claude_cmd "$prompt" "$mode" "$wt_path" "$extra_args")
 
     if [[ "$mode" == "interactive" ]]; then
         # Interactive: launch claude, then type the initial prompt
@@ -435,7 +457,7 @@ cmd_list() {
     ensure_tmux
 
     if ! tmux has-session -t "$DISPATCH_SESSION" 2>/dev/null; then
-        log_info "No conductor session running"
+        log_info "No dispatch session running"
         return
     fi
 
@@ -445,7 +467,7 @@ cmd_list() {
 
     local format="#{window_name}|#{pane_current_command}|#{pane_current_path}|#{pane_dead}"
     while IFS='|' read -r name cmd path dead; do
-        [[ "$name" == "conductor" ]] && continue  # Skip control window
+        [[ "$name" == "dispatch" ]] && continue  # Skip control window
 
         local status_icon status_text
         if [[ "$dead" == "1" ]]; then
@@ -620,7 +642,7 @@ cmd_attach() {
     ensure_tmux
 
     if ! tmux has-session -t "$DISPATCH_SESSION" 2>/dev/null; then
-        log_error "No conductor session running"
+        log_error "No dispatch session running"
         exit 1
     fi
 
