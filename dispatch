@@ -1,0 +1,710 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# dispatch — Orchestrate Claude Code agents in git worktrees
+# https://github.com/paperMoose/dispatch
+
+VERSION="0.1.0"
+DISPATCH_SESSION="dispatch"
+WORKTREE_DIR=".worktrees"
+
+# ---------------------------------------------------------------------------
+# Colors and formatting
+# ---------------------------------------------------------------------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# Tab colors for iTerm2 (cycle through these)
+TAB_COLORS=("2E86AB" "A23B72" "F18F01" "C73E1D" "3B1F2B" "44BBA4" "E94F37" "393E41")
+
+log_info()  { echo -e "${BLUE}▸${NC} $*"; }
+log_ok()    { echo -e "${GREEN}✓${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}⚠${NC} $*"; }
+log_error() { echo -e "${RED}✗${NC} $*" >&2; }
+log_dim()   { echo -e "${DIM}$*${NC}"; }
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+DISPATCH_CONFIG="${DISPATCH_CONFIG:-$HOME/.dispatch.yml}"
+DISPATCH_BASE_BRANCH="${DISPATCH_BASE_BRANCH:-dev}"
+DISPATCH_MODEL="${DISPATCH_MODEL:-}"
+DISPATCH_MAX_TURNS="${DISPATCH_MAX_TURNS:-}"
+DISPATCH_MAX_BUDGET="${DISPATCH_MAX_BUDGET:-}"
+DISPATCH_ALLOWED_TOOLS="${DISPATCH_ALLOWED_TOOLS:-Bash,Read,Write,Edit,Glob,Grep,Task,WebSearch,WebFetch}"
+
+load_config() {
+    if [[ -f "$DISPATCH_CONFIG" ]]; then
+        # Simple YAML parsing for flat keys
+        while IFS=': ' read -r key value; do
+            [[ "$key" =~ ^#.*$ ]] && continue
+            [[ -z "$key" ]] && continue
+            value="${value%\"}"
+            value="${value#\"}"
+            case "$key" in
+                base_branch)    DISPATCH_BASE_BRANCH="${DISPATCH_BASE_BRANCH:-$value}" ;;
+                model)          DISPATCH_MODEL="${DISPATCH_MODEL:-$value}" ;;
+                max_turns)      DISPATCH_MAX_TURNS="${DISPATCH_MAX_TURNS:-$value}" ;;
+                max_budget)     DISPATCH_MAX_BUDGET="${DISPATCH_MAX_BUDGET:-$value}" ;;
+                allowed_tools)  DISPATCH_ALLOWED_TOOLS="${DISPATCH_ALLOWED_TOOLS:-$value}" ;;
+                worktree_dir)   WORKTREE_DIR="${value}" ;;
+            esac
+        done < "$DISPATCH_CONFIG"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Git helpers
+# ---------------------------------------------------------------------------
+git_root() {
+    git rev-parse --show-toplevel 2>/dev/null || {
+        log_error "Not inside a git repository"
+        exit 1
+    }
+}
+
+ensure_worktree_dir() {
+    local root
+    root="$(git_root)"
+    local dir="$root/$WORKTREE_DIR"
+    mkdir -p "$dir"
+
+    # Add to .gitignore if not already there
+    local gitignore="$root/.gitignore"
+    if [[ -f "$gitignore" ]]; then
+        grep -qxF "$WORKTREE_DIR/" "$gitignore" 2>/dev/null || echo "$WORKTREE_DIR/" >> "$gitignore"
+    fi
+
+    echo "$dir"
+}
+
+worktree_path() {
+    local id="$1"
+    local root
+    root="$(git_root)"
+    echo "$root/$WORKTREE_DIR/$id"
+}
+
+create_worktree() {
+    local id="$1"
+    local branch="$2"
+    local base="${3:-$DISPATCH_BASE_BRANCH}"
+    local wt_path
+    wt_path="$(worktree_path "$id")"
+
+    if [[ -d "$wt_path" ]]; then
+        log_warn "Worktree already exists: $wt_path"
+        return 0
+    fi
+
+    ensure_worktree_dir > /dev/null
+
+    log_info "Creating worktree: ${BOLD}$id${NC} (branch: $branch off $base)"
+    git fetch origin "$base" 2>/dev/null || true
+    git worktree add -b "$branch" "$wt_path" "origin/$base" 2>/dev/null || {
+        # Branch might already exist
+        git worktree add "$wt_path" "$branch" 2>/dev/null || {
+            log_error "Failed to create worktree"
+            exit 1
+        }
+    }
+    log_ok "Worktree created at $wt_path"
+}
+
+remove_worktree() {
+    local id="$1"
+    local wt_path
+    wt_path="$(worktree_path "$id")"
+
+    if [[ ! -d "$wt_path" ]]; then
+        log_warn "Worktree not found: $id"
+        return 0
+    fi
+
+    log_info "Removing worktree: $id"
+    git worktree remove --force "$wt_path" 2>/dev/null || {
+        log_error "Failed to remove worktree. Try: git worktree remove --force $wt_path"
+        return 1
+    }
+    git worktree prune 2>/dev/null
+    log_ok "Worktree removed: $id"
+}
+
+# ---------------------------------------------------------------------------
+# tmux helpers
+# ---------------------------------------------------------------------------
+ensure_tmux() {
+    if ! command -v tmux &>/dev/null; then
+        log_error "tmux is required. Install with: brew install tmux"
+        exit 1
+    fi
+}
+
+ensure_session() {
+    if ! tmux has-session -t "$DISPATCH_SESSION" 2>/dev/null; then
+        tmux new-session -d -s "$DISPATCH_SESSION" -n "conductor"
+        # Mark the initial window so we can identify it
+        tmux send-keys -t "$DISPATCH_SESSION:conductor" "# Conductor control window" Enter
+    fi
+}
+
+window_exists() {
+    local id="$1"
+    tmux list-windows -t "$DISPATCH_SESSION" -F "#{window_name}" 2>/dev/null | grep -qxF "$id"
+}
+
+create_window() {
+    local id="$1"
+    local cwd="$2"
+
+    if window_exists "$id"; then
+        log_warn "Window '$id' already exists in tmux session"
+        return 1
+    fi
+
+    ensure_session
+    tmux new-window -t "$DISPATCH_SESSION" -n "$id" -c "$cwd"
+
+    # Set tab color (cycle through palette)
+    local window_count
+    window_count=$(tmux list-windows -t "$DISPATCH_SESSION" 2>/dev/null | wc -l | tr -d ' ')
+    local color_idx=$(( (window_count - 1) % ${#TAB_COLORS[@]} ))
+    local hex="${TAB_COLORS[$color_idx]}"
+    local r=$((16#${hex:0:2}))
+    local g=$((16#${hex:2:2}))
+    local b=$((16#${hex:4:2}))
+
+    # iTerm2 tab color escape sequences
+    tmux send-keys -t "$DISPATCH_SESSION:$id" "printf '\\033]6;1;bg;red;brightness;${r}\\007'" Enter
+    tmux send-keys -t "$DISPATCH_SESSION:$id" "printf '\\033]6;1;bg;green;brightness;${g}\\007'" Enter
+    tmux send-keys -t "$DISPATCH_SESSION:$id" "printf '\\033]6;1;bg;blue;brightness;${b}\\007'" Enter
+
+    # Set iTerm2 badge
+    local badge
+    badge=$(echo -n "$id" | base64)
+    tmux send-keys -t "$DISPATCH_SESSION:$id" "printf '\\033]1337;SetBadgeFormat=${badge}\\007'" Enter
+}
+
+# ---------------------------------------------------------------------------
+# Linear integration
+# ---------------------------------------------------------------------------
+fetch_linear_ticket() {
+    local ticket_id="$1"
+
+    # Try using Linear MCP if available, fall back to gh/API
+    # For now, use a simple approach with the linear CLI or API
+    local title=""
+    local description=""
+
+    # Check if it looks like a Linear ticket ID (e.g., HEY-837)
+    if [[ "$ticket_id" =~ ^[A-Z]+-[0-9]+$ ]]; then
+        log_info "Fetching Linear ticket: $ticket_id"
+
+        # Try gh CLI with Linear API (requires LINEAR_API_KEY)
+        if [[ -n "${LINEAR_API_KEY:-}" ]]; then
+            local response
+            response=$(curl -s -X POST https://api.linear.app/graphql \
+                -H "Content-Type: application/json" \
+                -H "Authorization: $LINEAR_API_KEY" \
+                -d "{\"query\": \"{ issueSearch(filter: { number: { eq: ${ticket_id##*-} } }) { nodes { title description identifier url branchName } } }\"}" 2>/dev/null) || true
+
+            if [[ -n "$response" ]]; then
+                title=$(echo "$response" | python3 -c "import sys,json; nodes=json.load(sys.stdin).get('data',{}).get('issueSearch',{}).get('nodes',[]); print(nodes[0]['title'] if nodes else '')" 2>/dev/null) || true
+                description=$(echo "$response" | python3 -c "import sys,json; nodes=json.load(sys.stdin).get('data',{}).get('issueSearch',{}).get('nodes',[]); print(nodes[0].get('description','') if nodes else '')" 2>/dev/null) || true
+            fi
+        fi
+
+        if [[ -z "$title" ]]; then
+            log_warn "Could not fetch ticket details (set LINEAR_API_KEY for auto-fetch)"
+            title="$ticket_id"
+        else
+            log_ok "Ticket: $title"
+        fi
+    fi
+
+    echo "$title"
+    echo "---"
+    echo "$description"
+}
+
+# ---------------------------------------------------------------------------
+# Build Claude Code command
+# ---------------------------------------------------------------------------
+build_claude_cmd() {
+    local prompt="$1"
+    local mode="$2"  # interactive or headless
+    local extra_args="${3:-}"
+
+    local cmd="claude"
+
+    if [[ "$mode" == "headless" ]]; then
+        cmd="$cmd -p"
+    fi
+
+    if [[ -n "$DISPATCH_MODEL" ]]; then
+        cmd="$cmd --model $DISPATCH_MODEL"
+    fi
+
+    if [[ "$mode" == "headless" ]]; then
+        cmd="$cmd --allowedTools \"$DISPATCH_ALLOWED_TOOLS\""
+
+        if [[ -n "$DISPATCH_MAX_TURNS" ]]; then
+            cmd="$cmd --max-turns $DISPATCH_MAX_TURNS"
+        fi
+
+        if [[ -n "$DISPATCH_MAX_BUDGET" ]]; then
+            cmd="$cmd --max-budget-usd $DISPATCH_MAX_BUDGET"
+        fi
+
+        cmd="$cmd --output-format json"
+    fi
+
+    if [[ -n "$extra_args" ]]; then
+        cmd="$cmd $extra_args"
+    fi
+
+    # For interactive mode, we just launch claude with the initial message
+    # For headless, the prompt is part of -p
+    if [[ "$mode" == "headless" ]]; then
+        cmd="$cmd \"$(echo "$prompt" | sed 's/"/\\"/g')\""
+    fi
+
+    echo "$cmd"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+cmd_run() {
+    local input=""
+    local headless=false
+    local model=""
+    local max_turns=""
+    local max_budget=""
+    local base_branch=""
+    local prompt_file=""
+    local extra_args=""
+    local skip_worktree=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --headless|-H)      headless=true; shift ;;
+            --model|-m)         DISPATCH_MODEL="$2"; shift 2 ;;
+            --max-turns)        DISPATCH_MAX_TURNS="$2"; shift 2 ;;
+            --max-budget)       DISPATCH_MAX_BUDGET="$2"; shift 2 ;;
+            --base|-b)          DISPATCH_BASE_BRANCH="$2"; shift 2 ;;
+            --prompt-file|-f)   prompt_file="$2"; shift 2 ;;
+            --no-worktree)      skip_worktree=true; shift ;;
+            --*)                extra_args="$extra_args $1"; shift ;;
+            *)                  input="$1"; shift ;;
+        esac
+    done
+
+    if [[ -z "$input" && -z "$prompt_file" ]]; then
+        log_error "Usage: dispatch run <ticket-id|prompt> [options]"
+        echo ""
+        echo "  dispatch run HEY-837                    # from Linear ticket"
+        echo "  dispatch run HEY-837 --headless         # run in background"
+        echo "  dispatch run \"Fix the auth bug\"         # free text prompt"
+        echo "  dispatch run HEY-837 --model sonnet     # specific model"
+        echo "  dispatch run HEY-837 --max-turns 10     # limit turns"
+        echo "  dispatch run HEY-837 --base main        # branch off main"
+        exit 1
+    fi
+
+    ensure_tmux
+
+    # Determine if input is a ticket ID or free text
+    local id=""
+    local prompt=""
+    local branch=""
+    local is_ticket=false
+
+    if [[ "$input" =~ ^[A-Z]+-[0-9]+$ ]]; then
+        is_ticket=true
+        id=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+        branch="${id}"
+
+        # Fetch ticket details for the prompt
+        local ticket_info
+        ticket_info=$(fetch_linear_ticket "$input")
+        local title
+        title=$(echo "$ticket_info" | head -1)
+        local description
+        description=$(echo "$ticket_info" | tail -n +3)
+
+        if [[ -n "$description" && "$description" != "" ]]; then
+            prompt="Linear ticket $input: $title
+
+$description
+
+Work on this ticket. Create commits as you go. When done, push the branch."
+        else
+            prompt="Work on ticket $input: $title. Create commits as you go. When done, push the branch."
+        fi
+
+        # Use ticket ID for window name
+        id="$input"
+    else
+        # Free text — generate an ID from the prompt
+        id="task-$(date +%s | tail -c 6)"
+        branch="$id"
+        prompt="$input"
+    fi
+
+    # Load prompt from file if specified
+    if [[ -n "$prompt_file" ]]; then
+        if [[ ! -f "$prompt_file" ]]; then
+            log_error "Prompt file not found: $prompt_file"
+            exit 1
+        fi
+        prompt=$(cat "$prompt_file")
+    fi
+
+    # Check if already running
+    if window_exists "$id"; then
+        log_error "Agent '$id' is already running. Use 'dispatch stop $id' first."
+        exit 1
+    fi
+
+    # Create worktree
+    local wt_path
+    if [[ "$skip_worktree" == true ]]; then
+        wt_path="$(git_root)"
+    else
+        create_worktree "$id" "$branch" "$DISPATCH_BASE_BRANCH"
+        wt_path="$(worktree_path "$id")"
+    fi
+
+    # Create tmux window
+    create_window "$id" "$wt_path"
+
+    # Build and send the Claude command
+    local mode="interactive"
+    if [[ "$headless" == true ]]; then
+        mode="headless"
+    fi
+
+    local claude_cmd
+    claude_cmd=$(build_claude_cmd "$prompt" "$mode" "$extra_args")
+
+    if [[ "$mode" == "interactive" ]]; then
+        # Interactive: launch claude, then type the initial prompt
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "claude" Enter
+        sleep 2  # Wait for Claude Code to initialize
+        # Send the prompt as the first message
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "$prompt"
+        tmux send-keys -t "$DISPATCH_SESSION:$id" Enter
+    else
+        # Headless: run with -p flag, tee to log
+        local log_file="$wt_path/.dispatch.log"
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "$claude_cmd 2>&1 | tee $log_file" Enter
+    fi
+
+    echo ""
+    log_ok "Agent ${BOLD}$id${NC} launched (${mode})"
+    log_dim "  Worktree: $wt_path"
+    log_dim "  Branch:   $branch"
+    if [[ "$headless" == true ]]; then
+        log_dim "  Logs:     dispatch logs $id"
+        log_dim "  Stop:     dispatch stop $id"
+    fi
+    echo ""
+
+    # If interactive and not headless, attach to the session
+    if [[ "$headless" == false ]]; then
+        log_info "Attaching to tmux session..."
+        log_dim "  Detach with: Ctrl-B then D"
+        echo ""
+        # Use iTerm2 integration if available, otherwise regular attach
+        if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
+            tmux -CC attach -t "$DISPATCH_SESSION"
+        else
+            tmux attach -t "$DISPATCH_SESSION"
+        fi
+    fi
+}
+
+cmd_list() {
+    ensure_tmux
+
+    if ! tmux has-session -t "$DISPATCH_SESSION" 2>/dev/null; then
+        log_info "No conductor session running"
+        return
+    fi
+
+    echo ""
+    echo -e "${BOLD}Running Agents${NC}"
+    echo -e "${DIM}──────────────────────────────────────────────${NC}"
+
+    local format="#{window_name}|#{pane_current_command}|#{pane_current_path}|#{pane_dead}"
+    while IFS='|' read -r name cmd path dead; do
+        [[ "$name" == "conductor" ]] && continue  # Skip control window
+
+        local status_icon status_text
+        if [[ "$dead" == "1" ]]; then
+            status_icon="${RED}●${NC}"
+            status_text="exited"
+        elif [[ "$cmd" == "claude" || "$cmd" == "node" ]]; then
+            status_icon="${GREEN}●${NC}"
+            status_text="running"
+        else
+            status_icon="${YELLOW}●${NC}"
+            status_text="idle"
+        fi
+
+        local short_path
+        short_path=$(echo "$path" | sed "s|$(git_root)/||")
+
+        echo -e "  $status_icon ${BOLD}$name${NC}  ${DIM}($status_text)${NC}"
+        echo -e "    ${DIM}path: $short_path${NC}"
+    done < <(tmux list-windows -t "$DISPATCH_SESSION" -F "$format" 2>/dev/null)
+
+    echo ""
+}
+
+cmd_logs() {
+    local id="$1"
+
+    if [[ -z "$id" ]]; then
+        log_error "Usage: dispatch logs <agent-id>"
+        exit 1
+    fi
+
+    # Check for log file first (headless mode)
+    local wt_path
+    wt_path="$(worktree_path "$id")"
+    local log_file="$wt_path/.dispatch.log"
+
+    if [[ -f "$log_file" ]]; then
+        log_info "Tailing log: $log_file"
+        tail -f "$log_file"
+    elif window_exists "$id"; then
+        # Fall back to tmux capture
+        log_info "Capturing output from tmux pane..."
+        tmux capture-pane -t "$DISPATCH_SESSION:$id" -p -S -100
+    else
+        log_error "Agent '$id' not found"
+        exit 1
+    fi
+}
+
+cmd_stop() {
+    local id="$1"
+
+    if [[ -z "$id" ]]; then
+        log_error "Usage: dispatch stop <agent-id>"
+        exit 1
+    fi
+
+    if ! window_exists "$id"; then
+        log_warn "Agent '$id' is not running"
+        return
+    fi
+
+    log_info "Stopping agent: $id"
+    # Send Ctrl-C to gracefully stop Claude Code
+    tmux send-keys -t "$DISPATCH_SESSION:$id" C-c
+    sleep 1
+    # Kill the window
+    tmux kill-window -t "$DISPATCH_SESSION:$id" 2>/dev/null || true
+    log_ok "Agent stopped: $id"
+}
+
+cmd_resume() {
+    local id="$1"
+    local headless=false
+
+    if [[ -z "$id" ]]; then
+        log_error "Usage: dispatch resume <agent-id> [--headless]"
+        exit 1
+    fi
+
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --headless|-H) headless=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    ensure_tmux
+
+    local wt_path
+    wt_path="$(worktree_path "$id")"
+
+    if [[ ! -d "$wt_path" ]]; then
+        log_error "Worktree not found for '$id'. Nothing to resume."
+        exit 1
+    fi
+
+    # Check if already running
+    if window_exists "$id"; then
+        log_warn "Agent '$id' is already running. Attaching..."
+        if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
+            tmux -CC attach -t "$DISPATCH_SESSION"
+        else
+            tmux attach -t "$DISPATCH_SESSION"
+        fi
+        return
+    fi
+
+    # Create new window and resume claude with --continue
+    create_window "$id" "$wt_path"
+
+    if [[ "$headless" == false ]]; then
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "claude --continue" Enter
+        log_ok "Resumed agent: $id (interactive)"
+        if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
+            tmux -CC attach -t "$DISPATCH_SESSION"
+        else
+            tmux attach -t "$DISPATCH_SESSION"
+        fi
+    else
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "claude -p --continue --output-format json \"Continue working on the task.\" 2>&1 | tee $wt_path/.dispatch.log" Enter
+        log_ok "Resumed agent: $id (headless)"
+    fi
+}
+
+cmd_cleanup() {
+    local id="$1"
+    local all=false
+
+    if [[ "$id" == "--all" ]]; then
+        all=true
+    fi
+
+    if [[ "$all" == true ]]; then
+        log_info "Cleaning up all worktrees..."
+        local root
+        root="$(git_root)"
+        local wt_dir="$root/$WORKTREE_DIR"
+
+        if [[ ! -d "$wt_dir" ]]; then
+            log_info "No worktrees to clean up"
+            return
+        fi
+
+        for dir in "$wt_dir"/*/; do
+            [[ ! -d "$dir" ]] && continue
+            local name
+            name=$(basename "$dir")
+
+            # Stop if running
+            if window_exists "$name"; then
+                cmd_stop "$name"
+            fi
+
+            remove_worktree "$name"
+        done
+    elif [[ -n "$id" ]]; then
+        # Stop if running
+        if window_exists "$id"; then
+            cmd_stop "$id"
+        fi
+
+        remove_worktree "$id"
+    else
+        log_error "Usage: dispatch cleanup <agent-id> | --all"
+        exit 1
+    fi
+}
+
+cmd_attach() {
+    ensure_tmux
+
+    if ! tmux has-session -t "$DISPATCH_SESSION" 2>/dev/null; then
+        log_error "No conductor session running"
+        exit 1
+    fi
+
+    if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
+        tmux -CC attach -t "$DISPATCH_SESSION"
+    else
+        tmux attach -t "$DISPATCH_SESSION"
+    fi
+}
+
+cmd_version() {
+    echo "dispatch v$VERSION"
+}
+
+cmd_help() {
+    cat <<'HELP'
+dispatch — Orchestrate Claude Code agents in git worktrees
+
+Usage:
+  dispatch run <ticket|prompt> [options]    Launch an agent
+  dispatch list                             Show running agents
+  dispatch logs <id>                        Tail agent output
+  dispatch stop <id>                        Stop an agent
+  dispatch resume <id> [--headless]         Resume a stopped agent
+  dispatch cleanup <id> | --all             Remove worktree(s)
+  dispatch attach                           Attach to tmux session
+
+Run Options:
+  --headless, -H          Run in background (no interactive tab)
+  --model, -m <model>     Claude model (sonnet, opus, etc.)
+  --max-turns <n>         Limit agent turns (headless only)
+  --max-budget <usd>      Cap spending (headless only)
+  --base, -b <branch>     Base branch for worktree (default: dev)
+  --prompt-file, -f <file> Load prompt from file
+  --no-worktree           Run in current directory (no worktree)
+
+Examples:
+  dispatch run HEY-837                      Interactive, from Linear ticket
+  dispatch run HEY-837 --headless           Background mode
+  dispatch run "Fix the auth bug"           Free text prompt
+  dispatch run HEY-837 -m sonnet            Use Sonnet model
+  dispatch run HEY-837 --max-turns 10       Limit to 10 turns
+
+Environment:
+  LINEAR_API_KEY          Linear API key for ticket fetching
+  DISPATCH_BASE_BRANCH   Default base branch (default: dev)
+  DISPATCH_MODEL         Default model
+  DISPATCH_CONFIG        Config file path (default: ~/.dispatch.yml)
+
+Config (~/.dispatch.yml):
+  base_branch: dev
+  model: opus
+  max_turns: 20
+  worktree_dir: .worktrees
+
+HELP
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+    load_config
+
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        run)        cmd_run "$@" ;;
+        list|ls)    cmd_list ;;
+        logs)       cmd_logs "$@" ;;
+        stop)       cmd_stop "$@" ;;
+        resume)     cmd_resume "$@" ;;
+        cleanup)    cmd_cleanup "$@" ;;
+        attach)     cmd_attach ;;
+        version|-v|--version) cmd_version ;;
+        help|-h|--help)       cmd_help ;;
+        *)
+            log_error "Unknown command: $cmd"
+            echo ""
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

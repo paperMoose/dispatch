@@ -1,0 +1,17 @@
+# dispatch configuration
+# Copy to ~/.dispatch.yml and customize
+
+# Base branch for new worktrees (default: dev)
+base_branch: dev
+
+# Default Claude model (default: uses claude CLI default)
+# model: opus
+
+# Maximum agent turns for headless mode
+# max_turns: 20
+
+# Maximum budget (USD) for headless mode
+# max_budget: 5.00
+
+# Directory for worktrees relative to repo root (default: .worktrees)
+worktree_dir: .worktrees
