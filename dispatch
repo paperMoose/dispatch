@@ -15,7 +15,6 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
@@ -97,9 +96,10 @@ ensure_worktree_dir() {
 
     # Add to .gitignore if not already there
     local gitignore="$root/.gitignore"
-    if [[ -f "$gitignore" ]]; then
-        grep -qxF "$WORKTREE_DIR/" "$gitignore" 2>/dev/null || echo "$WORKTREE_DIR/" >> "$gitignore"
+    if [[ ! -f "$gitignore" ]]; then
+        touch "$gitignore"
     fi
+    grep -qxF "$WORKTREE_DIR/" "$gitignore" 2>/dev/null || echo "$WORKTREE_DIR/" >> "$gitignore"
 
     echo "$dir"
 }
@@ -267,13 +267,15 @@ fetch_linear_ticket() {
     if [[ "$ticket_id" =~ ^[A-Z]+-[0-9]+$ ]]; then
         log_info "Fetching Linear ticket: $ticket_id"
 
-        # Try gh CLI with Linear API (requires LINEAR_API_KEY)
+        # Try Linear API (requires LINEAR_API_KEY)
         if [[ -n "${LINEAR_API_KEY:-}" ]]; then
+            local team_key="${ticket_id%%-*}"
+            local issue_num="${ticket_id##*-}"
             local response
             response=$(curl -s -X POST https://api.linear.app/graphql \
                 -H "Content-Type: application/json" \
                 -H "Authorization: $LINEAR_API_KEY" \
-                -d "{\"query\": \"{ issueSearch(filter: { number: { eq: ${ticket_id##*-} } }) { nodes { title description identifier url branchName } } }\"}" 2>/dev/null) || true
+                -d "{\"query\": \"{ issueSearch(filter: { number: { eq: $issue_num }, team: { key: { eq: \\\"$team_key\\\" } } }) { nodes { title description identifier url branchName } } }\"}" 2>/dev/null) || true
 
             if [[ -n "$response" ]]; then
                 title=$(echo "$response" | python3 -c "import sys,json; nodes=json.load(sys.stdin).get('data',{}).get('issueSearch',{}).get('nodes',[]); print(nodes[0]['title'] if nodes else '')" 2>/dev/null) || true
@@ -427,11 +429,13 @@ Work on this ticket. Create commits as you go. When done, push the branch."
         [[ -n "$DISPATCH_MODEL" ]] && model_flag="--model $DISPATCH_MODEL"
         tmux send-keys -t "$DISPATCH_SESSION:$id" "claude $model_flag" Enter
         wait_for_claude "$DISPATCH_SESSION:$id"
-        # Write prompt to file and paste via tmux load-buffer to handle special chars
+        # Write prompt to file and paste via named tmux buffer to handle special chars
         local pf="$wt_path/.dispatch-prompt.txt"
         printf '%s' "$prompt" > "$pf"
-        tmux load-buffer "$pf"
-        tmux paste-buffer -t "$DISPATCH_SESSION:$id"
+        local buf_name="dispatch-${id//[^a-zA-Z0-9]/-}"
+        tmux load-buffer -b "$buf_name" "$pf"
+        tmux paste-buffer -b "$buf_name" -t "$DISPATCH_SESSION:$id"
+        tmux delete-buffer -b "$buf_name" 2>/dev/null || true
         tmux send-keys -t "$DISPATCH_SESSION:$id" Enter
     else
         # Headless: run with -p flag, tee to log, notify on completion
@@ -525,6 +529,9 @@ cmd_list() {
     echo -e "${BOLD}Running Agents${NC}"
     echo -e "${DIM}──────────────────────────────────────────────${NC}"
 
+    local root
+    root="$(git_root 2>/dev/null || echo "")"
+
     local format="#{window_name}|#{pane_current_command}|#{pane_current_path}|#{pane_dead}"
     while IFS='|' read -r name cmd path dead; do
         [[ "$name" == "dispatch" ]] && continue  # Skip control window
@@ -541,8 +548,8 @@ cmd_list() {
             status_text="idle"
         fi
 
-        local short_path
-        short_path=$(echo "$path" | sed "s|$(git_root)/||")
+        local short_path="$path"
+        [[ -n "$root" ]] && short_path="${path#"$root/"}"
 
         echo -e "  $status_icon ${BOLD}$name${NC}  ${DIM}($status_text)${NC}"
         echo -e "    ${DIM}path: $short_path${NC}"
@@ -552,7 +559,7 @@ cmd_list() {
 }
 
 cmd_logs() {
-    local id="$1"
+    local id="${1:-}"
 
     if [[ -z "$id" ]]; then
         log_error "Usage: dispatch logs <agent-id>"
@@ -578,7 +585,7 @@ cmd_logs() {
 }
 
 cmd_stop() {
-    local id="$1"
+    local id="${1:-}"
 
     if [[ -z "$id" ]]; then
         log_error "Usage: dispatch stop <agent-id>"
@@ -600,7 +607,7 @@ cmd_stop() {
 }
 
 cmd_resume() {
-    local id="$1"
+    local id="${1:-}"
     local headless=false
 
     if [[ -z "$id" ]]; then
@@ -608,7 +615,7 @@ cmd_resume() {
         exit 1
     fi
 
-    shift
+    shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --headless|-H) headless=true; shift ;;
@@ -641,7 +648,9 @@ cmd_resume() {
     create_window "$id" "$wt_path"
 
     if [[ "$headless" == false ]]; then
-        tmux send-keys -t "$DISPATCH_SESSION:$id" "claude --continue" Enter
+        local model_flag=""
+        [[ -n "$DISPATCH_MODEL" ]] && model_flag="--model $DISPATCH_MODEL"
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "claude --continue $model_flag" Enter
         log_ok "Resumed agent: $id (interactive)"
         if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
             tmux -CC attach -t "$DISPATCH_SESSION"
@@ -649,13 +658,17 @@ cmd_resume() {
             tmux attach -t "$DISPATCH_SESSION"
         fi
     else
-        tmux send-keys -t "$DISPATCH_SESSION:$id" "claude -p --continue --output-format json \"Continue working on the task.\" 2>&1 | tee $wt_path/.dispatch.log" Enter
+        local resume_prompt="Continue working on the task."
+        local claude_cmd
+        claude_cmd=$(build_claude_cmd "$resume_prompt" "headless" "$wt_path" "--continue")
+        local log_file="$wt_path/.dispatch.log"
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "$claude_cmd 2>&1 | tee $log_file; dispatch _notify-done $id" Enter
         log_ok "Resumed agent: $id (headless)"
     fi
 }
 
 cmd_cleanup() {
-    local id="$1"
+    local id="${1:-}"
     local all=false
 
     if [[ "$id" == "--all" ]]; then
