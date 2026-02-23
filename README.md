@@ -29,17 +29,21 @@ Each agent gets:
 ## Install
 
 ```bash
-# Clone and symlink
-git clone https://github.com/paperMoose/dispatch.git
-ln -s $(pwd)/dispatch/dispatch /usr/local/bin/dispatch
+npm install -g dispatch-agent
+```
 
-# Or just copy the script
-curl -o /usr/local/bin/dispatch https://raw.githubusercontent.com/paperMoose/dispatch/main/dispatch
-chmod +x /usr/local/bin/dispatch
+Or from source:
+
+```bash
+git clone https://github.com/paperMoose/dispatch.git
+cd dispatch
+npm install && npm run build
+npm link
 ```
 
 ### Requirements
 
+- Node.js 20+
 - `tmux` — `brew install tmux`
 - `claude` — [Claude Code CLI](https://code.claude.com)
 - `git` — for worktree management

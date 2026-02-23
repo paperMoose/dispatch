@@ -1,0 +1,32 @@
+{
+  "name": "dispatch-agent",
+  "version": "0.3.0",
+  "description": "Orchestrate Claude Code agents in git worktrees",
+  "type": "module",
+  "bin": {
+    "dispatch": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "claude",
+    "agent",
+    "tmux",
+    "worktree",
+    "dispatch"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paperMoose/dispatch.git"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  }
+}
