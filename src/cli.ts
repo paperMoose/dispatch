@@ -84,7 +84,7 @@ async function main(): Promise<void> {
       cmdCleanup(rest, config);
       break;
     case "attach":
-      cmdAttach();
+      cmdAttach(rest);
       break;
     case "_notify-done":
       cmdNotifyDone(rest);

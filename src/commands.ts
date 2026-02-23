@@ -492,13 +492,14 @@ export function cmdCleanup(args: string[], config: Config): void {
   }
 }
 
-export function cmdAttach(): void {
+export function cmdAttach(args: string[]): void {
   ensureTmux();
   if (!tmuxHasSession()) {
     log.error("No dispatch session running");
     process.exit(1);
   }
-  tmuxAttach();
+  const window = args[0] || undefined;
+  tmuxAttach(window);
 }
 
 export function cmdNotifyDone(args: string[]): void {

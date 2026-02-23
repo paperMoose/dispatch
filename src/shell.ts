@@ -270,17 +270,85 @@ export function tmuxHasSession(): boolean {
   return r.status === 0;
 }
 
-export function tmuxAttach(): void {
-  const isIterm = process.env.TERM_PROGRAM === "iTerm.app";
-  if (isIterm) {
-    spawnSync("tmux", ["-CC", "attach", "-t", DISPATCH_SESSION], {
-      stdio: "inherit",
-    });
+export function tmuxAttach(window?: string): void {
+  const target = window ? `${DISPATCH_SESSION}:${window}` : DISPATCH_SESSION;
+  const hasTTY = process.stdin.isTTY;
+
+  if (hasTTY) {
+    const isIterm = process.env.TERM_PROGRAM === "iTerm.app";
+    if (isIterm) {
+      spawnSync("tmux", ["-CC", "attach", "-t", target], {
+        stdio: "inherit",
+      });
+    } else {
+      spawnSync("tmux", ["attach", "-t", target], {
+        stdio: "inherit",
+      });
+    }
+  } else if (process.platform === "darwin") {
+    // No TTY (e.g. inside Claude Code) — open a new terminal tab via AppleScript
+    const cmd = `tmux attach -t ${target}`;
+    const script = openTerminalTabAppleScript(cmd);
+    if (script) {
+      spawnSync("osascript", ["-e", script], { stdio: "pipe" });
+    } else {
+      log.warn(`No supported terminal detected. Run manually: tmux attach -t ${target}`);
+    }
   } else {
-    spawnSync("tmux", ["attach", "-t", DISPATCH_SESSION], {
-      stdio: "inherit",
-    });
+    log.warn(`No TTY available. Run manually: tmux attach -t ${target}`);
   }
+}
+
+function openTerminalTabAppleScript(command: string): string | null {
+  // Check which terminal is running, in preference order
+  const terminals = [
+    {
+      name: "iTerm2",
+      bundleId: "com.googlecode.iterm2",
+      script: `tell application "iTerm2"
+        activate
+        tell current window
+          create tab with default profile
+          tell current session
+            write text "${command}"
+          end tell
+        end tell
+      end tell`,
+    },
+    {
+      name: "Warp",
+      bundleId: "dev.warp.Warp-Stable",
+      script: `tell application "Warp"
+        activate
+        tell application "System Events" to tell process "Warp"
+          keystroke "t" using command down
+          delay 0.3
+          keystroke "${command}"
+          key code 36
+        end tell
+      end tell`,
+    },
+    {
+      name: "Terminal",
+      bundleId: "com.apple.Terminal",
+      script: `tell application "Terminal"
+        activate
+        do script "${command}"
+      end tell`,
+    },
+  ];
+
+  for (const t of terminals) {
+    const r = spawnSync("osascript", [
+      "-e",
+      `tell application "System Events" to return (name of processes) contains "${t.name}"`,
+    ], { stdio: "pipe" });
+    if (r.stdout?.toString().trim() === "true") {
+      return t.script;
+    }
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
