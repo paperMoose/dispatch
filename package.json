@@ -8,7 +8,8 @@
   },
   "scripts": {
     "build": "tsup",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "files": [
     "dist"
@@ -27,6 +28,7 @@
   },
   "devDependencies": {
     "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
     "typescript": "^5.4.0"
   }
 }

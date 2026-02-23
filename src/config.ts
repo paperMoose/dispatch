@@ -33,7 +33,7 @@ const KEY_MAP: Record<string, keyof Config> = {
   claude_timeout: "claudeTimeout",
 };
 
-function parseSimpleYaml(content: string): Record<string, string> {
+export function parseSimpleYaml(content: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
