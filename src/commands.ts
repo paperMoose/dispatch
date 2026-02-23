@@ -27,12 +27,12 @@ import {
   tailFile,
 } from "./shell.js";
 
-const TICKET_RE = /^[A-Z]+-[0-9]+$/;
+export const TICKET_RE = /^[A-Z]+-[0-9]+$/;
 
 // ---------------------------------------------------------------------------
 // Build Claude command
 // ---------------------------------------------------------------------------
-function buildClaudeCmd(
+export function buildClaudeCmd(
   prompt: string,
   mode: "interactive" | "headless",
   wtPath: string,
@@ -134,7 +134,7 @@ async function launchAgent(
     // Launch claude, wait for it to be ready, then send prompt via paste-buffer
     const modelFlag = config.model ? `--model ${config.model}` : "";
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "claude ${modelFlag}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude ${modelFlag}" Enter`,
     );
     waitForClaude(id, config.claudeTimeout);
 
@@ -152,7 +152,7 @@ async function launchAgent(
     // Headless: run with -p, tee to log, notify on completion
     const logFile = join(wtPath, ".dispatch.log");
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && ${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
     );
   }
 
@@ -386,7 +386,7 @@ export function cmdResume(args: string[], config: Config): void {
   if (!headless) {
     const modelFlag = config.model ? `--model ${config.model}` : "";
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "claude --continue ${modelFlag}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude --continue ${modelFlag}" Enter`,
     );
     log.ok(`Resumed agent: ${id} (interactive)`);
     tmuxAttach();
@@ -401,7 +401,7 @@ export function cmdResume(args: string[], config: Config): void {
     );
     const logFile = join(wtPath, ".dispatch.log");
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && ${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
     );
     log.ok(`Resumed agent: ${id} (headless)`);
   }
