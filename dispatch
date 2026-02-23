@@ -39,6 +39,7 @@ _ENV_MODEL="${DISPATCH_MODEL:-}"
 _ENV_MAX_TURNS="${DISPATCH_MAX_TURNS:-}"
 _ENV_MAX_BUDGET="${DISPATCH_MAX_BUDGET:-}"
 _ENV_ALLOWED_TOOLS="${DISPATCH_ALLOWED_TOOLS:-}"
+_ENV_CLAUDE_TIMEOUT="${DISPATCH_CLAUDE_TIMEOUT:-}"
 
 # Initialize with empty — config file and then defaults fill these in
 DISPATCH_BASE_BRANCH=""
@@ -46,22 +47,26 @@ DISPATCH_MODEL=""
 DISPATCH_MAX_TURNS=""
 DISPATCH_MAX_BUDGET=""
 DISPATCH_ALLOWED_TOOLS=""
+DISPATCH_CLAUDE_TIMEOUT=""
 
 load_config() {
     # 1. Load config file values
     if [[ -f "$DISPATCH_CONFIG" ]]; then
-        while IFS=': ' read -r key value; do
-            [[ "$key" =~ ^#.*$ ]] && continue
-            [[ -z "$key" ]] && continue
+        while IFS= read -r line; do
+            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+            local key="${line%%:*}"
+            local value="${line#*: }"
+            key=$(echo "$key" | xargs)  # trim whitespace
             value="${value%\"}"
             value="${value#\"}"
             case "$key" in
-                base_branch)    DISPATCH_BASE_BRANCH="$value" ;;
-                model)          DISPATCH_MODEL="$value" ;;
-                max_turns)      DISPATCH_MAX_TURNS="$value" ;;
-                max_budget)     DISPATCH_MAX_BUDGET="$value" ;;
-                allowed_tools)  DISPATCH_ALLOWED_TOOLS="$value" ;;
-                worktree_dir)   WORKTREE_DIR="$value" ;;
+                base_branch)     DISPATCH_BASE_BRANCH="$value" ;;
+                model)           DISPATCH_MODEL="$value" ;;
+                max_turns)       DISPATCH_MAX_TURNS="$value" ;;
+                max_budget)      DISPATCH_MAX_BUDGET="$value" ;;
+                allowed_tools)   DISPATCH_ALLOWED_TOOLS="$value" ;;
+                worktree_dir)    WORKTREE_DIR="$value" ;;
+                claude_timeout)  DISPATCH_CLAUDE_TIMEOUT="$value" ;;
             esac
         done < "$DISPATCH_CONFIG"
     fi
@@ -72,10 +77,12 @@ load_config() {
     [[ -n "$_ENV_MAX_TURNS" ]] && DISPATCH_MAX_TURNS="$_ENV_MAX_TURNS"
     [[ -n "$_ENV_MAX_BUDGET" ]] && DISPATCH_MAX_BUDGET="$_ENV_MAX_BUDGET"
     [[ -n "$_ENV_ALLOWED_TOOLS" ]] && DISPATCH_ALLOWED_TOOLS="$_ENV_ALLOWED_TOOLS"
+    [[ -n "$_ENV_CLAUDE_TIMEOUT" ]] && DISPATCH_CLAUDE_TIMEOUT="$_ENV_CLAUDE_TIMEOUT"
 
     # 3. Apply defaults for anything still unset
     DISPATCH_BASE_BRANCH="${DISPATCH_BASE_BRANCH:-dev}"
     DISPATCH_ALLOWED_TOOLS="${DISPATCH_ALLOWED_TOOLS:-Bash,Read,Write,Edit,Glob,Grep,Task,WebSearch,WebFetch}"
+    DISPATCH_CLAUDE_TIMEOUT="${DISPATCH_CLAUDE_TIMEOUT:-30}"
 }
 
 # ---------------------------------------------------------------------------
@@ -229,7 +236,7 @@ notify() {
 # ---------------------------------------------------------------------------
 wait_for_claude() {
     local target="$1"
-    local max_wait=15
+    local max_wait="${DISPATCH_CLAUDE_TIMEOUT:-30}"
     local waited=0
 
     while (( waited < max_wait )); do
@@ -395,6 +402,9 @@ Work on this ticket. Create commits as you go. When done, push the branch."
             log_error "Prompt file not found: $prompt_file_arg"
             return 1
         fi
+        if [[ "$input" =~ ^[A-Z]+-[0-9]+$ ]]; then
+            log_warn "Ticket prompt for $input overridden by --prompt-file"
+        fi
         prompt=$(cat "$prompt_file_arg")
     fi
 
@@ -440,7 +450,7 @@ Work on this ticket. Create commits as you go. When done, push the branch."
     else
         # Headless: run with -p flag, tee to log, notify on completion
         local log_file="$wt_path/.dispatch.log"
-        tmux send-keys -t "$DISPATCH_SESSION:$id" "$claude_cmd 2>&1 | tee $log_file; dispatch _notify-done $id" Enter
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "$claude_cmd 2>&1 | tee -a $log_file; dispatch _notify-done $id" Enter
     fi
 
     echo ""
@@ -662,18 +672,23 @@ cmd_resume() {
         local claude_cmd
         claude_cmd=$(build_claude_cmd "$resume_prompt" "headless" "$wt_path" "--continue")
         local log_file="$wt_path/.dispatch.log"
-        tmux send-keys -t "$DISPATCH_SESSION:$id" "$claude_cmd 2>&1 | tee $log_file; dispatch _notify-done $id" Enter
+        tmux send-keys -t "$DISPATCH_SESSION:$id" "$claude_cmd 2>&1 | tee -a $log_file; dispatch _notify-done $id" Enter
         log_ok "Resumed agent: $id (headless)"
     fi
 }
 
 cmd_cleanup() {
-    local id="${1:-}"
+    local id=""
     local all=false
+    local delete_branch=false
 
-    if [[ "$id" == "--all" ]]; then
-        all=true
-    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all)            all=true; shift ;;
+            --delete-branch)  delete_branch=true; shift ;;
+            *)                id="$1"; shift ;;
+        esac
+    done
 
     if [[ "$all" == true ]]; then
         log_info "Cleaning up all worktrees..."
@@ -697,6 +712,10 @@ cmd_cleanup() {
             fi
 
             remove_worktree "$name"
+
+            if [[ "$delete_branch" == true ]]; then
+                git branch -D "$name" 2>/dev/null && log_ok "Deleted branch: $name" || log_warn "Branch not found: $name"
+            fi
         done
     elif [[ -n "$id" ]]; then
         # Stop if running
@@ -705,8 +724,12 @@ cmd_cleanup() {
         fi
 
         remove_worktree "$id"
+
+        if [[ "$delete_branch" == true ]]; then
+            git branch -D "$id" 2>/dev/null && log_ok "Deleted branch: $id" || log_warn "Branch not found: $id"
+        fi
     else
-        log_error "Usage: dispatch cleanup <agent-id> | --all"
+        log_error "Usage: dispatch cleanup <agent-id> | --all [--delete-branch]"
         exit 1
     fi
 }
@@ -740,7 +763,7 @@ Usage:
   dispatch logs <id>                                Tail agent output
   dispatch stop <id>                                Stop an agent
   dispatch resume <id> [--headless]                 Resume a stopped agent
-  dispatch cleanup <id> | --all                     Remove worktree(s)
+  dispatch cleanup <id> | --all [--delete-branch]    Remove worktree(s)
   dispatch attach                                   Attach to tmux session
 
 Run Options:
@@ -770,6 +793,7 @@ Config (~/.dispatch.yml):
   base_branch: dev
   model: opus
   max_turns: 20
+  claude_timeout: 30
   worktree_dir: .worktrees
 
 HELP
