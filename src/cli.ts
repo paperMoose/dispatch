@@ -31,6 +31,7 @@ Run Options:
   --max-budget <usd>      Cap spending (headless only)
   --base, -b <branch>     Base branch for worktree (default: dev)
   --prompt-file, -f <file> Load prompt from file
+  --name, -n <name>       Override agent name and branch (e.g., HEY-879)
   --no-worktree           Run in current directory (no worktree)
 
 Examples:

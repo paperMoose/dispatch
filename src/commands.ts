@@ -72,6 +72,7 @@ async function launchAgent(
   extraArgs: string,
   skipWorktree: boolean,
   promptFileArg: string,
+  nameOverride: string,
   config: Config,
 ): Promise<void> {
   let id: string;
@@ -94,6 +95,12 @@ async function launchAgent(
     id = `task-${suffix}`;
     branch = id;
     prompt = input;
+  }
+
+  // Override id and branch if --name was provided
+  if (nameOverride) {
+    id = nameOverride;
+    branch = nameOverride.toLowerCase();
   }
 
   // Load prompt from file if specified
@@ -178,6 +185,7 @@ export async function cmdRun(
   let promptFile = "";
   let extraArgs = "";
   let skipWorktree = false;
+  let nameOverride = "";
 
   let i = 0;
   while (i < args.length) {
@@ -215,6 +223,11 @@ export async function cmdRun(
         skipWorktree = true;
         i++;
         break;
+      case "--name":
+      case "-n":
+        nameOverride = args[++i];
+        i++;
+        break;
       default:
         if (arg.startsWith("--")) {
           extraArgs += ` ${arg}`;
@@ -247,7 +260,7 @@ export async function cmdRun(
   }
 
   for (const input of inputs) {
-    await launchAgent(input, headless, extraArgs, skipWorktree, promptFile, config);
+    await launchAgent(input, headless, extraArgs, skipWorktree, promptFile, nameOverride, config);
   }
 
   console.log();
