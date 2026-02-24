@@ -167,9 +167,9 @@ export function ensureSession(): void {
     execSync(
       `tmux new-session -d -s "${DISPATCH_SESSION}" -n "dispatch"`,
     );
-    // Enable mouse scrolling and increase scrollback buffer
-    execSync(`tmux set -t "${DISPATCH_SESSION}" -g mouse on`);
-    execSync(`tmux set -t "${DISPATCH_SESSION}" -g history-limit 50000`);
+    // Enable mouse scrolling and increase scrollback buffer (session-scoped, not global)
+    execSync(`tmux set -t "${DISPATCH_SESSION}" mouse on`);
+    execSync(`tmux set -t "${DISPATCH_SESSION}" history-limit 50000`);
     execSync(
       `tmux send-keys -t "${DISPATCH_SESSION}:dispatch" "# Dispatch control window" Enter`,
     );
@@ -203,6 +203,13 @@ export function createWindow(id: string, cwd: string): boolean {
     process.exit(1);
   }
 
+  const target = `${DISPATCH_SESSION}:${id}`;
+
+  // Allow iTerm2 escape sequences to pass through tmux (requires tmux 3.3+)
+  execQuiet(`tmux setw -t "${target}" allow-passthrough on`);
+  // Prevent tmux from renaming window based on running process
+  execQuiet(`tmux setw -t "${target}" automatic-rename off`);
+
   // Set tab color (cycle through palette)
   const countStr = execQuiet(
     `tmux list-windows -t "${DISPATCH_SESSION}" | wc -l`,
@@ -212,23 +219,11 @@ export function createWindow(id: string, cwd: string): boolean {
   const red = parseInt(hex.slice(0, 2), 16);
   const green = parseInt(hex.slice(2, 4), 16);
   const blue = parseInt(hex.slice(4, 6), 16);
-
-  const target = `${DISPATCH_SESSION}:${id}`;
-  // iTerm2 tab color escape sequences
-  execSync(
-    `tmux send-keys -t "${target}" "printf '\\\\033]6;1;bg;red;brightness;${red}\\\\007'" Enter`,
-  );
-  execSync(
-    `tmux send-keys -t "${target}" "printf '\\\\033]6;1;bg;green;brightness;${green}\\\\007'" Enter`,
-  );
-  execSync(
-    `tmux send-keys -t "${target}" "printf '\\\\033]6;1;bg;blue;brightness;${blue}\\\\007'" Enter`,
-  );
-
-  // Set iTerm2 badge
   const badge = Buffer.from(id).toString("base64");
+
+  // Set iTerm2 tab color + badge in a single command, then clear the shell
   execSync(
-    `tmux send-keys -t "${target}" "printf '\\\\033]1337;SetBadgeFormat=${badge}\\\\007'" Enter`,
+    `tmux send-keys -t "${target}" "printf '\\\\033]6;1;bg;red;brightness;${red}\\\\007\\\\033]6;1;bg;green;brightness;${green}\\\\007\\\\033]6;1;bg;blue;brightness;${blue}\\\\007\\\\033]1337;SetBadgeFormat=${badge}\\\\007' && clear" Enter`,
   );
 
   return true;
@@ -290,8 +285,7 @@ export function tmuxAttach(window?: string): void {
     }
   } else if (process.platform === "darwin") {
     // No TTY (e.g. inside Claude Code) — open a new terminal tab via AppleScript
-    const cmd = `tmux attach -t ${target}`;
-    const script = openTerminalTabAppleScript(cmd);
+    const script = openTerminalTabAppleScript(target);
     if (script) {
       spawnSync("osascript", ["-e", script], { stdio: "pipe" });
     } else {
@@ -302,18 +296,19 @@ export function tmuxAttach(window?: string): void {
   }
 }
 
-function openTerminalTabAppleScript(command: string): string | null {
+function openTerminalTabAppleScript(target: string): string | null {
   // Check which terminal is running, in preference order
   const terminals = [
     {
       name: "iTerm2",
       bundleId: "com.googlecode.iterm2",
+      // Use -CC for native iTerm2 tab integration with tmux
       script: `tell application "iTerm2"
         activate
         tell current window
           create tab with default profile
           tell current session
-            write text "${command}"
+            write text "tmux -CC attach -t ${target}"
           end tell
         end tell
       end tell`,
@@ -326,7 +321,7 @@ function openTerminalTabAppleScript(command: string): string | null {
         tell application "System Events" to tell process "Warp"
           keystroke "t" using command down
           delay 0.3
-          keystroke "${command}"
+          keystroke "tmux attach -t ${target}"
           key code 36
         end tell
       end tell`,
@@ -336,7 +331,7 @@ function openTerminalTabAppleScript(command: string): string | null {
       bundleId: "com.apple.Terminal",
       script: `tell application "Terminal"
         activate
-        do script "${command}"
+        do script "tmux attach -t ${target}"
       end tell`,
     },
   ];
