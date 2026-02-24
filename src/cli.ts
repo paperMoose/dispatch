@@ -22,7 +22,7 @@ Usage:
   dispatch stop <id>                                Stop an agent
   dispatch resume <id> [--headless]                 Resume a stopped agent
   dispatch cleanup <id> | --all [--delete-branch]    Remove worktree(s)
-  dispatch attach                                   Attach to tmux session
+  dispatch attach [id]                               Attach to tmux session (or specific agent)
 
 Run Options:
   --headless, -H          Run in background (no interactive tab)
