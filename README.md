@@ -29,7 +29,7 @@ Each agent gets:
 ## Install
 
 ```bash
-npm install -g dispatch-agent
+npm install -g dispatch-agents
 ```
 
 Or from source:
