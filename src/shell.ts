@@ -167,6 +167,9 @@ export function ensureSession(): void {
     execSync(
       `tmux new-session -d -s "${DISPATCH_SESSION}" -n "dispatch"`,
     );
+    // Enable mouse scrolling and increase scrollback buffer
+    execSync(`tmux set -t "${DISPATCH_SESSION}" -g mouse on`);
+    execSync(`tmux set -t "${DISPATCH_SESSION}" -g history-limit 50000`);
     execSync(
       `tmux send-keys -t "${DISPATCH_SESSION}:dispatch" "# Dispatch control window" Enter`,
     );

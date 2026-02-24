@@ -30,6 +30,16 @@ import {
 
 export const TICKET_RE = /^[A-Z]+-[0-9]+$/;
 
+/** Turn any string into a short, kebab-case slug suitable for branch/window names. */
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")  // non-alphanumeric → dash
+    .replace(/^-+|-+$/g, "")      // trim leading/trailing dashes
+    .slice(0, 40)                  // keep it short
+    .replace(/-+$/, "");           // trim trailing dash from truncation
+}
+
 // ---------------------------------------------------------------------------
 // Build Claude command
 // ---------------------------------------------------------------------------
@@ -58,7 +68,8 @@ export function buildClaudeCmd(
   if (mode === "headless") {
     const promptFile = join(wtPath, ".dispatch-prompt.txt");
     writeFileSync(promptFile, prompt);
-    cmd += ` "$(cat '${promptFile}')"`;
+    // Use stdin redirection — command substitution gets mangled by tmux send-keys
+    cmd += ` < '${promptFile}'`;
   }
 
   return cmd;
@@ -81,10 +92,9 @@ async function launchAgent(
   let branch: string;
 
   if (TICKET_RE.test(input)) {
-    id = input;
-    branch = input.toLowerCase();
-
     const ticket = await fetchLinearTicket(input);
+    id = `${input.toLowerCase()}-${slugify(ticket.title)}`;
+    branch = id;
 
     if (ticket.description) {
       prompt = `Linear ticket ${input}: ${ticket.title}\n\n${ticket.description}\n\nWork on this ticket. Create commits as you go. When done, push the branch.`;
@@ -92,16 +102,15 @@ async function launchAgent(
       prompt = `Work on ticket ${input}: ${ticket.title}. Create commits as you go. When done, push the branch.`;
     }
   } else {
-    const suffix = String(Date.now()).slice(-6);
-    id = `task-${suffix}`;
+    id = slugify(input) || `task-${String(Date.now()).slice(-6)}`;
     branch = id;
     prompt = input;
   }
 
   // Override id and branch if --name was provided
   if (nameOverride) {
-    id = nameOverride;
-    branch = nameOverride.toLowerCase();
+    id = slugify(nameOverride) || nameOverride;
+    branch = id;
   }
 
   // Load prompt from file if specified
@@ -115,6 +124,18 @@ async function launchAgent(
     }
     const { readFileSync } = await import("fs");
     prompt = readFileSync(promptFileArg, "utf-8");
+
+    // Derive name from prompt content if we only have a placeholder
+    if (!nameOverride && !TICKET_RE.test(input)) {
+      // Use first heading or first non-empty line
+      const firstLine = prompt.split("\n").find((l) => l.trim().length > 0) || "";
+      const clean = firstLine.replace(/^#+\s*/, "");  // strip markdown heading
+      const derived = slugify(clean);
+      if (derived) {
+        id = derived;
+        branch = id;
+      }
+    }
   }
 
   // Check if already running
@@ -251,6 +272,11 @@ export async function cmdRun(
     console.log("  dispatch run HEY-837 --max-turns 10          # limit turns");
     console.log("  dispatch run HEY-837 --base main             # branch off main");
     process.exit(1);
+  }
+
+  // When --prompt-file is used without a positional arg, generate a placeholder input
+  if (inputs.length === 0 && promptFile) {
+    inputs.push("prompt-file");
   }
 
   ensureTmux();
