@@ -8,6 +8,7 @@ import {
   cmdCleanup,
   cmdAttach,
   cmdNotifyDone,
+  cmdSetup,
 } from "./commands.js";
 
 const VERSION = "0.3.0";
@@ -28,6 +29,7 @@ Commands:
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
   dispatch cleanup --all [--delete-branch] Remove all worktrees
   dispatch attach [id]                     Open tmux session (or jump to specific agent)
+  dispatch setup                           Add dispatch docs to ~/.claude/CLAUDE.md
 
 Run Options:
   --headless, -H            Fire-and-forget mode (no interactive terminal)
@@ -112,6 +114,9 @@ async function main(): Promise<void> {
       break;
     case "attach":
       cmdAttach(rest);
+      break;
+    case "setup":
+      cmdSetup();
       break;
     case "_notify-done":
       cmdNotifyDone(rest);

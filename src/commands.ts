@@ -1,5 +1,6 @@
-import { existsSync, writeFileSync, readdirSync } from "fs";
-import { join, basename } from "path";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync } from "fs";
+import { join, basename, resolve } from "path";
+import { homedir } from "os";
 import { execSync, spawnSync } from "child_process";
 import type { Config } from "./config.js";
 import {
@@ -506,4 +507,59 @@ export function cmdNotifyDone(args: string[]): void {
   const agentId = args[0] || "unknown";
   notify("Dispatch", `Agent ${agentId} finished`);
   log.ok(`Agent ${agentId} completed`);
+}
+
+const CLAUDE_MD_SNIPPET = `
+## Dispatch (multi-agent orchestration)
+
+Launch Claude Code agents in isolated git worktrees. Each agent gets its own branch, so it can make changes without affecting your working tree or other agents. Agents run inside tmux — interactive mode to watch/guide, headless for fire-and-forget.
+
+**When to use:** Hand off well-defined tasks (Linear tickets, bug fixes, features) to a parallel agent while you keep working. Avoid dispatching two agents to the same files — they'll create merge conflicts.
+
+\`\`\`bash
+# Launch agents
+dispatch run HEY-123                                  # From Linear ticket (auto-fetches title + description)
+dispatch run "Fix the auth bug" --name HEY-879        # Free text with custom branch name (hey-879)
+dispatch run HEY-123 --headless                       # Background — check with: dispatch logs HEY-123
+dispatch run HEY-123 -m sonnet --max-turns 20         # Sonnet, 20 turn limit
+dispatch run HEY-123 HEY-124 HEY-125                 # Batch launch in parallel
+
+# Monitor and interact
+dispatch list                                         # Status: green=running, yellow=idle, red=exited
+dispatch attach HEY-123                               # Jump to agent's terminal (auto-opens tab if no TTY)
+dispatch logs HEY-123                                 # Tail headless agent output
+
+# Lifecycle
+dispatch stop HEY-123                                 # Interrupt agent (worktree preserved)
+dispatch resume HEY-123                               # Pick up where it left off (--continue)
+dispatch cleanup HEY-123 --delete-branch              # Remove worktree + branch
+dispatch cleanup --all --delete-branch                # Clean up everything
+\`\`\`
+
+**Key flags:** \`--name/-n\` sets branch name, \`--model/-m\` picks model, \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev.
+
+Config: \`~/.dispatch.yml\` (base_branch, model, max_turns, max_budget, worktree_dir, claude_timeout).
+Requires: tmux, claude CLI, git.
+`;
+
+export function cmdSetup(): void {
+  const claudeMdPath = join(homedir(), ".claude", "CLAUDE.md");
+
+  if (existsSync(claudeMdPath)) {
+    const content = readFileSync(claudeMdPath, "utf-8");
+    if (content.includes("dispatch run") || content.includes("Dispatch (multi-agent")) {
+      log.warn("Dispatch section already exists in ~/.claude/CLAUDE.md");
+      log.info("To update it, remove the existing Dispatch section and run setup again.");
+      return;
+    }
+    appendFileSync(claudeMdPath, "\n" + CLAUDE_MD_SNIPPET);
+    log.ok("Added dispatch section to ~/.claude/CLAUDE.md");
+  } else {
+    const claudeDir = join(homedir(), ".claude");
+    if (!existsSync(claudeDir)) {
+      spawnSync("mkdir", ["-p", claudeDir]);
+    }
+    writeFileSync(claudeMdPath, CLAUDE_MD_SNIPPET.trimStart());
+    log.ok("Created ~/.claude/CLAUDE.md with dispatch section");
+  }
 }
