@@ -1,6 +1,6 @@
 {
   "name": "dispatch-agents",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Orchestrate Claude Code agents in git worktrees",
   "type": "module",
   "bin": {
