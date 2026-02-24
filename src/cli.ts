@@ -13,47 +13,74 @@ import {
 const VERSION = "0.3.0";
 
 function help(): void {
-  console.log(`dispatch — Orchestrate Claude Code agents in git worktrees
+  console.log(`dispatch — Launch Claude Code agents in isolated git worktrees
 
-Usage:
-  dispatch run <ticket|prompt> [more...] [options]  Launch agent(s)
-  dispatch list                                     Show running agents
-  dispatch logs <id>                                Tail agent output
-  dispatch stop <id>                                Stop an agent
-  dispatch resume <id> [--headless]                 Resume a stopped agent
-  dispatch cleanup <id> | --all [--delete-branch]    Remove worktree(s)
-  dispatch attach [id]                               Attach to tmux session (or specific agent)
+Each agent gets its own branch and worktree, so it can make changes without
+affecting your working tree or other agents. Agents run inside tmux — use
+interactive mode to watch and guide them, or headless for fire-and-forget.
+
+Commands:
+  dispatch run <ticket|prompt> [options]   Launch an agent
+  dispatch list                            Show all running agents with status
+  dispatch logs <id>                       Tail a headless agent's output
+  dispatch stop <id>                       Send Ctrl-C and kill the tmux window
+  dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
+  dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
+  dispatch cleanup --all [--delete-branch] Remove all worktrees
+  dispatch attach [id]                     Open tmux session (or jump to specific agent)
 
 Run Options:
-  --headless, -H          Run in background (no interactive tab)
-  --model, -m <model>     Claude model (sonnet, opus, etc.)
-  --max-turns <n>         Limit agent turns (headless only)
-  --max-budget <usd>      Cap spending (headless only)
-  --base, -b <branch>     Base branch for worktree (default: dev)
-  --prompt-file, -f <file> Load prompt from file
-  --name, -n <name>       Override agent name and branch (e.g., HEY-879)
-  --no-worktree           Run in current directory (no worktree)
+  --headless, -H            Fire-and-forget mode (no interactive terminal)
+  --model, -m <model>       Claude model: sonnet, opus, haiku (default: from config)
+  --name, -n <name>         Set agent name and branch (default: ticket ID or task-{random})
+  --max-turns <n>           Limit agentic turns before stopping (headless only)
+  --max-budget <usd>        Cap spending in USD (headless only)
+  --base, -b <branch>       Branch to create worktree from (default: dev)
+  --prompt-file, -f <file>  Load prompt from a file instead of CLI arg
+  --no-worktree             Run in current directory (no isolation)
+
+Lifecycle:
+  1. run    — Creates worktree + branch, opens tmux window, starts Claude Code
+  2. work   — Agent reads codebase, makes changes, commits, pushes, creates PRs
+  3. attach — View/interact with the agent (auto-opens terminal tab if no TTY)
+  4. stop   — Interrupt the agent (worktree and branch preserved)
+  5. resume — Pick up where it left off (Claude --continue)
+  6. cleanup — Remove worktree when done (--delete-branch to also delete the branch)
+
+Input Types:
+  Linear ticket    dispatch run HEY-837              Fetches title + description from Linear
+  Free text        dispatch run "Fix the auth bug"   Uses your prompt directly
+  Prompt file      dispatch run X -f prompt.txt      Loads prompt from file (good for long prompts)
 
 Examples:
-  dispatch run HEY-837                      Interactive, from Linear ticket
-  dispatch run HEY-837 --headless           Background mode
-  dispatch run HEY-837 HEY-838 HEY-839     Batch launch (multiple agents)
-  dispatch run "Fix the auth bug"           Free text prompt
-  dispatch run HEY-837 -m sonnet            Use Sonnet model
-  dispatch run HEY-837 --max-turns 10       Limit to 10 turns
+  dispatch run HEY-837                                  # Interactive, from Linear ticket
+  dispatch run HEY-837 --headless                       # Background — check with: dispatch logs HEY-837
+  dispatch run HEY-837 HEY-838 HEY-839                 # Batch launch 3 agents in parallel
+  dispatch run "Fix the auth bug" --name HEY-879        # Free text with custom branch name
+  dispatch run HEY-837 -m sonnet --max-turns 20         # Sonnet model, 20 turn limit
+  dispatch attach HEY-837                               # Jump to agent's terminal
+  dispatch list                                         # See what's running
+  dispatch cleanup --all --delete-branch                # Clean everything up
+
+Tips:
+  - Each agent works on its own branch — avoid dispatching two agents to the same files
+  - Use --name to get meaningful branch names (e.g., --name HEY-879 creates branch hey-879)
+  - Interactive mode lets you guide the agent; headless is for well-defined tasks
+  - Works from inside Claude Code sessions (agents launch in separate terminals)
+  - Use dispatch list to check status: green = running, yellow = idle, red = exited
 
 Environment:
-  LINEAR_API_KEY          Linear API key for ticket fetching
+  LINEAR_API_KEY         Linear API key for auto-fetching ticket details
   DISPATCH_BASE_BRANCH   Default base branch (default: dev)
   DISPATCH_MODEL         Default model
   DISPATCH_CONFIG        Config file path (default: ~/.dispatch.yml)
 
 Config (~/.dispatch.yml):
-  base_branch: dev
-  model: opus
-  max_turns: 20
-  claude_timeout: 30
-  worktree_dir: .worktrees`);
+  base_branch: dev        # Branch to create worktrees from
+  model: opus             # Default Claude model
+  max_turns: 20           # Default max turns for headless
+  claude_timeout: 30      # Seconds to wait for Claude to start
+  worktree_dir: .worktrees  # Where worktrees are created`);
 }
 
 async function main(): Promise<void> {
