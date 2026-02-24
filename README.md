@@ -49,6 +49,41 @@ npm link
 - `git` — for worktree management
 - iTerm2 (recommended) — for native tab integration via `tmux -CC`
 
+## MCP Server
+
+Dispatch includes an MCP server so Claude Code can orchestrate agents directly — no shell commands needed.
+
+### Setup
+
+After installing dispatch, register the MCP server with Claude Code:
+
+```bash
+claude mcp add --scope user dispatch node $(which dispatch-mcp)
+```
+
+This exposes 6 tools to Claude Code:
+
+| Tool | Description |
+|------|-------------|
+| `dispatch_run` | Launch an agent with a prompt (inline text, not a file) |
+| `dispatch_list` | List all running agents with status |
+| `dispatch_stop` | Stop a running agent |
+| `dispatch_resume` | Resume a stopped agent |
+| `dispatch_cleanup` | Remove worktrees and optionally branches |
+| `dispatch_logs` | Get recent output from an agent |
+
+### How it works
+
+The MCP server wraps the dispatch CLI over stdio using the [Model Context Protocol](https://modelcontextprotocol.io). When Claude Code calls `dispatch_run`, the server writes the prompt to a temp file, runs `dispatch run --prompt-file <file>`, and cleans up. Interactive agents open iTerm tabs; headless agents run in the background.
+
+### Working directory
+
+By default the MCP server uses the directory Claude Code is running in. To override, set `DISPATCH_CWD`:
+
+```bash
+claude mcp add --scope user dispatch -e DISPATCH_CWD=/path/to/repo node $(which dispatch-mcp)
+```
+
 ## Usage
 
 ### Launch an agent

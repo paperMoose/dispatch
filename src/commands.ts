@@ -208,6 +208,7 @@ export async function cmdRun(
   let extraArgs = "";
   let skipWorktree = false;
   let nameOverride = "";
+  let noAttach = false;
 
   let i = 0;
   while (i < args.length) {
@@ -243,6 +244,10 @@ export async function cmdRun(
         break;
       case "--no-worktree":
         skipWorktree = true;
+        i++;
+        break;
+      case "--no-attach":
+        noAttach = true;
         i++;
         break;
       case "--name":
@@ -293,7 +298,7 @@ export async function cmdRun(
   console.log();
 
   // For single interactive agent, attach to session
-  if (!headless && inputs.length === 1) {
+  if (!headless && inputs.length === 1 && !noAttach) {
     log.info("Attaching to tmux session...");
     log.dim("  Detach with: Ctrl-B then D");
     console.log();
@@ -401,11 +406,12 @@ export function cmdStop(args: string[]): void {
 export function cmdResume(args: string[], config: Config): void {
   const id = args[0];
   if (!id) {
-    log.error("Usage: dispatch resume <agent-id> [--headless]");
+    log.error("Usage: dispatch resume <agent-id> [--headless] [--no-attach]");
     process.exit(1);
   }
 
   const headless = args.includes("--headless") || args.includes("-H");
+  const noAttach = args.includes("--no-attach");
 
   ensureTmux();
 
@@ -429,7 +435,7 @@ export function cmdResume(args: string[], config: Config): void {
       `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude --continue ${modelFlag}" Enter`,
     );
     log.ok(`Resumed agent: ${id} (interactive)`);
-    tmuxAttach();
+    if (!noAttach) tmuxAttach();
   } else {
     const resumePrompt = "Continue working on the task.";
     const claudeCmd = buildClaudeCmd(

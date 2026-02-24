@@ -4,7 +4,8 @@
   "description": "Orchestrate Claude Code agents in git worktrees",
   "type": "module",
   "bin": {
-    "dispatch": "./dist/cli.js"
+    "dispatch": "./dist/cli.js",
+    "dispatch-mcp": "./dist/mcp.js"
   },
   "scripts": {
     "build": "tsup",
@@ -25,6 +26,9 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/paperMoose/dispatch.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
   },
   "devDependencies": {
     "tsup": "^8.0.0",
