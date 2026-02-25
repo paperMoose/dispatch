@@ -170,6 +170,9 @@ export function ensureSession(): void {
     // Enable mouse scrolling and increase scrollback buffer (session-scoped, not global)
     execSync(`tmux set -t "${DISPATCH_SESSION}" mouse on`);
     execSync(`tmux set -t "${DISPATCH_SESSION}" history-limit 50000`);
+    // Propagate tmux window names as terminal/tab titles
+    execQuiet(`tmux set -t "${DISPATCH_SESSION}" set-titles on`);
+    execQuiet(`tmux set -t "${DISPATCH_SESSION}" set-titles-string "#W"`);
     execSync(
       `tmux send-keys -t "${DISPATCH_SESSION}:dispatch" "# Dispatch control window" Enter`,
     );
@@ -221,9 +224,9 @@ export function createWindow(id: string, cwd: string): boolean {
   const blue = parseInt(hex.slice(4, 6), 16);
   const badge = Buffer.from(id).toString("base64");
 
-  // Set iTerm2 tab color + badge in a single command, then clear the shell
+  // Set terminal title (OSC 0 — works in all terminals) + iTerm2 tab color + badge, then clear
   execSync(
-    `tmux send-keys -t "${target}" "printf '\\\\033]6;1;bg;red;brightness;${red}\\\\007\\\\033]6;1;bg;green;brightness;${green}\\\\007\\\\033]6;1;bg;blue;brightness;${blue}\\\\007\\\\033]1337;SetBadgeFormat=${badge}\\\\007' && clear" Enter`,
+    `tmux send-keys -t "${target}" "printf '\\\\033]0;${id}\\\\007\\\\033]6;1;bg;red;brightness;${red}\\\\007\\\\033]6;1;bg;green;brightness;${green}\\\\007\\\\033]6;1;bg;blue;brightness;${blue}\\\\007\\\\033]1337;SetBadgeFormat=${badge}\\\\007' && clear" Enter`,
   );
 
   return true;
@@ -273,16 +276,10 @@ export function tmuxAttach(window?: string): void {
   const hasTTY = process.stdin.isTTY;
 
   if (hasTTY) {
-    const isIterm = process.env.TERM_PROGRAM === "iTerm.app";
-    if (isIterm) {
-      spawnSync("tmux", ["-CC", "attach", "-t", target], {
-        stdio: "inherit",
-      });
-    } else {
-      spawnSync("tmux", ["attach", "-t", target], {
-        stdio: "inherit",
-      });
-    }
+    spawnSync("tmux", ["attach", "-t", target], {
+      stdio: "inherit",
+      env: { ...process.env, TERM_PROGRAM: "dumb" },
+    });
   } else if (process.platform === "darwin") {
     // No TTY (e.g. inside Claude Code) — open a new terminal tab via AppleScript
     const script = openTerminalTabAppleScript(target);
@@ -297,18 +294,30 @@ export function tmuxAttach(window?: string): void {
 }
 
 function openTerminalTabAppleScript(target: string): string | null {
+  // Get tab color for this agent window
+  const agentName = target.includes(":") ? target.split(":").pop() : target;
+  const windowsStr = execQuiet(
+    `tmux list-windows -t "${DISPATCH_SESSION}" -F "#{window_name}"`,
+  );
+  const windows = windowsStr ? windowsStr.split("\n") : [];
+  const idx = windows.indexOf(agentName || "");
+  const hex = TAB_COLORS[Math.max(0, idx) % TAB_COLORS.length];
+  const red = parseInt(hex.slice(0, 2), 16);
+  const green = parseInt(hex.slice(2, 4), 16);
+  const blue = parseInt(hex.slice(4, 6), 16);
+
   // Check which terminal is running, in preference order
   const terminals = [
     {
       name: "iTerm2",
       bundleId: "com.googlecode.iterm2",
-      // Use -CC for native iTerm2 tab integration with tmux
       script: `tell application "iTerm2"
         activate
         tell current window
           create tab with default profile
           tell current session
-            write text "tmux -CC attach -t ${target}"
+            set name to "${agentName}"
+            write text "printf '\\\\e]6;1;bg;red;brightness;${red}\\\\a\\\\e]6;1;bg;green;brightness;${green}\\\\a\\\\e]6;1;bg;blue;brightness;${blue}\\\\a'; TERM_PROGRAM=dumb tmux attach -t ${target}"
           end tell
         end tell
       end tell`,
