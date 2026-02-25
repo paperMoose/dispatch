@@ -13,8 +13,8 @@ import {
   createWorktree,
   removeWorktree,
   ensureTmux,
-  windowExists,
-  createWindow,
+  sessionExists,
+  createSession,
   tmuxTarget,
   tmuxSendKeys,
   tmuxCapture,
@@ -86,7 +86,7 @@ async function launchAgent(
   promptFileArg: string,
   nameOverride: string,
   config: Config,
-): Promise<void> {
+): Promise<string | null> {
   let id: string;
   let prompt: string;
   let branch: string;
@@ -139,9 +139,9 @@ async function launchAgent(
   }
 
   // Check if already running
-  if (windowExists(id)) {
+  if (sessionExists(id)) {
     log.error(`Agent '${id}' is already running. Use 'dispatch stop ${id}' first.`);
-    return;
+    return null;
   }
 
   // Create worktree
@@ -154,7 +154,7 @@ async function launchAgent(
   }
 
   // Create tmux window
-  createWindow(id, wtPath);
+  createSession(id, wtPath);
 
   const mode = headless ? "headless" : "interactive";
   const claudeCmd = buildClaudeCmd(prompt, mode, wtPath, config, extraArgs);
@@ -193,6 +193,7 @@ async function launchAgent(
     log.dim(`  Logs:     dispatch logs ${id}`);
     log.dim(`  Stop:     dispatch stop ${id}`);
   }
+  return id;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,18 +292,20 @@ export async function cmdRun(
     console.log();
   }
 
+  const launchedIds: string[] = [];
   for (const input of inputs) {
-    await launchAgent(input, headless, extraArgs, skipWorktree, promptFile, nameOverride, config);
+    const id = await launchAgent(input, headless, extraArgs, skipWorktree, promptFile, nameOverride, config);
+    if (id) launchedIds.push(id);
   }
 
   console.log();
 
-  // For single interactive agent, attach to session
-  if (!headless && inputs.length === 1 && !noAttach) {
+  // For single interactive agent, attach to its session
+  if (!headless && launchedIds.length === 1 && !noAttach) {
     log.info("Attaching to tmux session...");
     log.dim("  Detach with: Ctrl-B then D");
     console.log();
-    tmuxAttach();
+    tmuxAttach(launchedIds[0]);
   } else if (inputs.length > 1) {
     log.ok(`All agents launched. Use ${fmt.BOLD}dispatch attach${fmt.NC} to view tabs.`);
   }
@@ -375,7 +378,7 @@ export function cmdLogs(args: string[], config: Config): void {
     });
     // Keep process alive while tailing
     child.on("exit", () => process.exit(0));
-  } else if (windowExists(id)) {
+  } else if (sessionExists(id)) {
     log.info("Capturing output from tmux pane...");
     console.log(tmuxCapture(id, 100));
   } else {
@@ -391,7 +394,7 @@ export function cmdStop(args: string[]): void {
     process.exit(1);
   }
 
-  if (!windowExists(id)) {
+  if (!sessionExists(id)) {
     log.warn(`Agent '${id}' is not running`);
     return;
   }
@@ -421,13 +424,13 @@ export function cmdResume(args: string[], config: Config): void {
     process.exit(1);
   }
 
-  if (windowExists(id)) {
+  if (sessionExists(id)) {
     log.warn(`Agent '${id}' is already running. Attaching...`);
-    tmuxAttach();
+    tmuxAttach(id);
     return;
   }
 
-  createWindow(id, wtPath);
+  createSession(id, wtPath);
 
   if (!headless) {
     const modelFlag = config.model ? `--model ${config.model}` : "";
@@ -435,7 +438,7 @@ export function cmdResume(args: string[], config: Config): void {
       `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude --continue ${modelFlag}" Enter`,
     );
     log.ok(`Resumed agent: ${id} (interactive)`);
-    if (!noAttach) tmuxAttach();
+    if (!noAttach) tmuxAttach(id);
   } else {
     const resumePrompt = "Continue working on the task.";
     const claudeCmd = buildClaudeCmd(
@@ -493,7 +496,7 @@ export function cmdCleanup(args: string[], config: Config): void {
     }
 
     for (const name of entries) {
-      if (windowExists(name)) {
+      if (sessionExists(name)) {
         cmdStop([name]);
       }
       removeWorktree(name, config);
@@ -507,7 +510,7 @@ export function cmdCleanup(args: string[], config: Config): void {
       }
     }
   } else if (id) {
-    if (windowExists(id)) {
+    if (sessionExists(id)) {
       cmdStop([id]);
     }
     removeWorktree(id, config);

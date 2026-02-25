@@ -259,7 +259,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Fallback: capture tmux pane
       try {
         const output = execSync(
-          `tmux capture-pane -t "dispatch:${agent_id}" -p -S -${lines}`,
+          `tmux capture-pane -t "dispatch-${agent_id}" -p -S -${lines}`,
           { encoding: "utf-8", timeout: 5000 },
         );
         return {

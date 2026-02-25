@@ -159,81 +159,48 @@ export function ensureTmux(): void {
   }
 }
 
-export function ensureSession(): void {
-  const r = spawnSync("tmux", ["has-session", "-t", DISPATCH_SESSION], {
+export function sessionExists(id: string): boolean {
+  const r = spawnSync("tmux", ["has-session", "-t", sessionName(id)], {
     stdio: "pipe",
   });
-  if (r.status !== 0) {
-    execSync(
-      `tmux new-session -d -s "${DISPATCH_SESSION}" -n "dispatch"`,
-    );
-    // Enable mouse scrolling and increase scrollback buffer (session-scoped, not global)
-    execSync(`tmux set -t "${DISPATCH_SESSION}" mouse on`);
-    execSync(`tmux set -t "${DISPATCH_SESSION}" history-limit 50000`);
-    // Propagate tmux window names as terminal/tab titles
-    execQuiet(`tmux set -t "${DISPATCH_SESSION}" set-titles on`);
-    execQuiet(`tmux set -t "${DISPATCH_SESSION}" set-titles-string "#W"`);
-    execSync(
-      `tmux send-keys -t "${DISPATCH_SESSION}:dispatch" "# Dispatch control window" Enter`,
-    );
-  }
+  return r.status === 0;
 }
 
-export function windowExists(id: string): boolean {
-  const out = execQuiet(
-    `tmux list-windows -t "${DISPATCH_SESSION}" -F "#{window_name}"`,
-  );
-  if (!out) return false;
-  return out.split("\n").includes(id);
-}
-
-export function createWindow(id: string, cwd: string): boolean {
-  if (windowExists(id)) {
-    log.warn(`Window '${id}' already exists in tmux session`);
+export function createSession(id: string, cwd: string): boolean {
+  if (sessionExists(id)) {
+    log.warn(`Session '${id}' already exists`);
     return false;
   }
 
-  ensureSession();
-  // Use spawnSync — some tmux versions need explicit handling
+  const session = sessionName(id);
   const r = spawnSync(
     "tmux",
-    ["new-window", "-a", "-t", DISPATCH_SESSION, "-n", id, "-c", cwd],
+    ["new-session", "-d", "-s", session, "-c", cwd],
     { stdio: "pipe" },
   );
   if (r.status !== 0) {
     const err = r.stderr?.toString().trim();
-    log.error(`Failed to create tmux window: ${err}`);
+    log.error(`Failed to create tmux session: ${err}`);
     process.exit(1);
   }
 
-  const target = `${DISPATCH_SESSION}:${id}`;
-
-  // Allow iTerm2 escape sequences to pass through tmux (requires tmux 3.3+)
-  execQuiet(`tmux setw -t "${target}" allow-passthrough on`);
-  // Prevent tmux from renaming window based on running process
-  execQuiet(`tmux setw -t "${target}" automatic-rename off`);
-
-  // Set tab color (cycle through palette)
-  const countStr = execQuiet(
-    `tmux list-windows -t "${DISPATCH_SESSION}" | wc -l`,
-  );
-  const count = parseInt(countStr || "1", 10);
-  const hex = TAB_COLORS[(count - 1) % TAB_COLORS.length];
-  const red = parseInt(hex.slice(0, 2), 16);
-  const green = parseInt(hex.slice(2, 4), 16);
-  const blue = parseInt(hex.slice(4, 6), 16);
-  const badge = Buffer.from(id).toString("base64");
-
-  // Set terminal title (OSC 0 — works in all terminals) + iTerm2 tab color + badge, then clear
-  execSync(
-    `tmux send-keys -t "${target}" "printf '\\\\033]0;${id}\\\\007\\\\033]6;1;bg;red;brightness;${red}\\\\007\\\\033]6;1;bg;green;brightness;${green}\\\\007\\\\033]6;1;bg;blue;brightness;${blue}\\\\007\\\\033]1337;SetBadgeFormat=${badge}\\\\007' && clear" Enter`,
-  );
+  // Session-level settings
+  execSync(`tmux set -t "${session}" mouse on`);
+  execSync(`tmux set -t "${session}" history-limit 50000`);
+  execQuiet(`tmux set -t "${session}" set-titles on`);
+  execQuiet(`tmux set -t "${session}" set-titles-string "${id}"`);
+  execQuiet(`tmux setw -t "${session}" allow-passthrough on`);
+  execQuiet(`tmux setw -t "${session}" automatic-rename off`);
 
   return true;
 }
 
+function sessionName(id: string): string {
+  return `${DISPATCH_SESSION}-${id}`;
+}
+
 export function tmuxTarget(id: string): string {
-  return `${DISPATCH_SESSION}:${id}`;
+  return sessionName(id);
 }
 
 export function tmuxSendKeys(id: string, keys: string): void {
@@ -253,26 +220,44 @@ export function tmuxCapture(id: string, lines: number): string {
 }
 
 export function tmuxKillWindow(id: string): void {
-  execQuiet(`tmux kill-window -t "${tmuxTarget(id)}"`);
+  execQuiet(`tmux kill-session -t "${tmuxTarget(id)}"`);
 }
 
 export function tmuxListWindows(): string {
-  return (
-    execQuiet(
-      `tmux list-windows -t "${DISPATCH_SESSION}" -F "#{window_name}|#{pane_current_command}|#{pane_current_path}|#{pane_dead}"`,
-    ) || ""
+  // List all dispatch-* sessions, format to match old window-based output
+  const out = execQuiet(
+    `tmux list-sessions -F "#{session_name}" 2>/dev/null`,
   );
+  if (!out) return "";
+  const prefix = `${DISPATCH_SESSION}-`;
+  const sessions = out.split("\n").filter((s) => s.startsWith(prefix));
+  const results: string[] = [];
+  for (const session of sessions) {
+    const id = session.slice(prefix.length);
+    const paneInfo = execQuiet(
+      `tmux list-panes -t "${session}" -F "#{pane_current_command}|#{pane_current_path}|#{pane_dead}"`,
+    );
+    const info = paneInfo?.split("\n")[0] || "||";
+    results.push(`${id}|${info}`);
+  }
+  return results.join("\n");
 }
 
 export function tmuxHasSession(): boolean {
-  const r = spawnSync("tmux", ["has-session", "-t", DISPATCH_SESSION], {
-    stdio: "pipe",
-  });
-  return r.status === 0;
+  // Check if any dispatch sessions exist
+  const out = execQuiet(
+    `tmux list-sessions -F "#{session_name}" 2>/dev/null`,
+  );
+  if (!out) return false;
+  return out.split("\n").some((s) => s.startsWith(`${DISPATCH_SESSION}-`));
 }
 
 export function tmuxAttach(window?: string): void {
-  const target = window ? `${DISPATCH_SESSION}:${window}` : DISPATCH_SESSION;
+  if (!window) {
+    log.error("Agent ID required for attach");
+    return;
+  }
+  const target = sessionName(window);
   const hasTTY = process.stdin.isTTY;
 
   if (hasTTY) {
@@ -294,7 +279,8 @@ export function tmuxAttach(window?: string): void {
 }
 
 function openTerminalTabAppleScript(target: string): string | null {
-  const agentName = target.includes(":") ? target.split(":").pop() : target;
+  const prefix = `${DISPATCH_SESSION}-`;
+  const agentName = target.startsWith(prefix) ? target.slice(prefix.length) : target;
 
   // Check which terminal is running, in preference order
   const terminals = [
