@@ -44,45 +44,6 @@ function makeTempPrompt(prompt: string): string {
   return path;
 }
 
-function tabColor(name: string): { r: number; g: number; b: number } {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
-  }
-  const hue = Math.abs(hash) % 360;
-  const s = 0.5, l = 0.35;
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
-  const m = l - c / 2;
-  let r1 = 0, g1 = 0, b1 = 0;
-  if (hue < 60) { r1 = c; g1 = x; } else if (hue < 120) { r1 = x; g1 = c; }
-  else if (hue < 180) { g1 = c; b1 = x; } else if (hue < 240) { g1 = x; b1 = c; }
-  else if (hue < 300) { r1 = x; b1 = c; } else { r1 = c; b1 = x; }
-  return {
-    r: Math.round((r1 + m) * 255),
-    g: Math.round((g1 + m) * 255),
-    b: Math.round((b1 + m) * 255),
-  };
-}
-
-function openItermTab(agentId: string): void {
-  const { r, g, b } = tabColor(agentId);
-  const colorEsc = `\\\\e]6;1;bg;red;brightness;${r}\\\\a\\\\e]6;1;bg;green;brightness;${g}\\\\a\\\\e]6;1;bg;blue;brightness;${b}\\\\a`;
-  const script = `tell application "iTerm2"
-    activate
-    tell current window
-      create tab with default profile
-      tell current session
-        write text "printf '\\\\e]1;${agentId}\\\\a${colorEsc}'; env TERM_PROGRAM=notterm tmux attach -t dispatch:${agentId}"
-        set name to "${agentId}"
-      end tell
-    end tell
-  end tell`;
-  try {
-    execSync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, { stdio: "pipe" });
-  } catch {}
-}
-
 const server = new Server(
   { name: "dispatch", version: "0.1.0" },
   { capabilities: { tools: {} } },

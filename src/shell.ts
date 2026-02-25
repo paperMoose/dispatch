@@ -294,17 +294,7 @@ export function tmuxAttach(window?: string): void {
 }
 
 function openTerminalTabAppleScript(target: string): string | null {
-  // Get tab color for this agent window
   const agentName = target.includes(":") ? target.split(":").pop() : target;
-  const windowsStr = execQuiet(
-    `tmux list-windows -t "${DISPATCH_SESSION}" -F "#{window_name}"`,
-  );
-  const windows = windowsStr ? windowsStr.split("\n") : [];
-  const idx = windows.indexOf(agentName || "");
-  const hex = TAB_COLORS[Math.max(0, idx) % TAB_COLORS.length];
-  const red = parseInt(hex.slice(0, 2), 16);
-  const green = parseInt(hex.slice(2, 4), 16);
-  const blue = parseInt(hex.slice(4, 6), 16);
 
   // Check which terminal is running, in preference order
   const terminals = [
@@ -317,7 +307,7 @@ function openTerminalTabAppleScript(target: string): string | null {
           create tab with default profile
           tell current session
             set name to "${agentName}"
-            write text "printf '\\\\e]6;1;bg;red;brightness;${red}\\\\a\\\\e]6;1;bg;green;brightness;${green}\\\\a\\\\e]6;1;bg;blue;brightness;${blue}\\\\a'; TERM_PROGRAM=dumb tmux attach -t ${target}"
+            write text "TERM_PROGRAM=dumb tmux attach -t ${target}"
           end tell
         end tell
       end tell`,
