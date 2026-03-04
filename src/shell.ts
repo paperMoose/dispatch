@@ -285,6 +285,19 @@ function openTerminalTabAppleScript(target: string): string | null {
   // Check which terminal is running, in preference order
   const terminals = [
     {
+      name: "cmux",
+      bundleId: "ai.manaflow.cmux",
+      script: `tell application "cmux"
+        activate
+        tell application "System Events" to tell process "cmux"
+          keystroke "t" using command down
+          delay 0.3
+          keystroke "TERM_PROGRAM=dumb tmux attach -t ${target}"
+          key code 36
+        end tell
+      end tell`,
+    },
+    {
       name: "iTerm2",
       bundleId: "com.googlecode.iterm2",
       script: `tell application "iTerm2"
