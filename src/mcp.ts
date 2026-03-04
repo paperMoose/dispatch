@@ -73,11 +73,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               "Agent name and branch name (kebab-case). Defaults to ticket ID or derived from prompt.",
           },
-          headless: {
-            type: "boolean",
-            description:
-              "Run in background (fire-and-forget). Default: false (interactive).",
-          },
           model: {
             type: "string",
             description: "Claude model: sonnet, opus, haiku",
@@ -88,7 +83,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           max_turns: {
             type: "number",
-            description: "Max agentic turns (headless only)",
+            description: "Max agentic turns",
           },
         },
         required: ["prompt"],
@@ -122,10 +117,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           agent_id: {
             type: "string",
             description: "Agent ID to resume",
-          },
-          headless: {
-            type: "boolean",
-            description: "Resume in headless mode",
           },
         },
         required: ["agent_id"],
@@ -182,7 +173,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         prompt,
         ticket,
         name: agentName,
-        headless,
         model,
         base_branch,
         max_turns,
@@ -195,11 +185,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         parts.push(ticket || "prompt-file");
         parts.push(`--prompt-file "${tmpFile}"`);
         if (agentName) parts.push(`--name "${agentName}"`);
-        if (headless) parts.push("--headless");
         if (model) parts.push(`--model ${model}`);
         if (base_branch) parts.push(`--base ${base_branch}`);
         if (max_turns) parts.push(`--max-turns ${max_turns}`);
-        if (headless) parts.push("--no-attach");
 
         const output = dispatch(parts.join(" "));
         return { content: [{ type: "text", text: output }] };
@@ -224,10 +212,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "dispatch_resume": {
-      const { agent_id, headless } = args as Record<string, any>;
-      const flags = headless ? "--headless" : "";
+      const { agent_id } = args as Record<string, any>;
       const output = dispatch(
-        `resume ${agent_id} ${flags} --no-attach`.trim(),
+        `resume ${agent_id} --no-attach`,
       );
       return { content: [{ type: "text", text: output }] };
     }
