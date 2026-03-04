@@ -60,7 +60,7 @@ export function buildClaudeCmd(
     cmd += ` --allowedTools "${config.allowedTools}"`;
     if (config.maxTurns) cmd += ` --max-turns ${config.maxTurns}`;
     if (config.maxBudget) cmd += ` --max-budget-usd ${config.maxBudget}`;
-    cmd += " --output-format json";
+    cmd += " --output-format stream-json --verbose";
   }
 
   if (extraArgs) cmd += ` ${extraArgs}`;
@@ -330,7 +330,7 @@ export function cmdList(config: Config): void {
 
   for (const line of lines.split("\n")) {
     if (!line) continue;
-    const [name, pid, path, dead] = line.split("|");
+    const [name, pid, path, dead, created] = line.split("|");
     if (name === "dispatch") continue; // Skip control window
 
     let statusIcon: string;
@@ -347,14 +347,53 @@ export function cmdList(config: Config): void {
       statusText = "idle";
     }
 
-    const shortPath = root && path.startsWith(root + "/")
-      ? path.slice(root.length + 1)
-      : path;
+    // Runtime
+    let runtime = "";
+    if (created) {
+      const secs = Math.floor(Date.now() / 1000) - parseInt(created, 10);
+      if (secs < 60) runtime = `${secs}s`;
+      else if (secs < 3600) runtime = `${Math.floor(secs / 60)}m`;
+      else runtime = `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`;
+    }
+
+    // Last meaningful activity — try log file first (headless), fall back to tmux
+    let lastLine = "";
+    const logFile = join(path, ".dispatch.log");
+    if (existsSync(logFile)) {
+      // stream-json: each line is a JSON object, find last assistant text
+      const tail = execQuiet(`tail -20 '${logFile}'`);
+      if (tail) {
+        const jsonLines = tail.split("\n").reverse();
+        for (const jl of jsonLines) {
+          try {
+            const obj = JSON.parse(jl);
+            if (obj.type === "assistant" && obj.message?.content) {
+              const textBlock = obj.message.content.find((b: any) => b.type === "text");
+              if (textBlock?.text) {
+                const lines = textBlock.text.split("\n").filter((l: string) => l.trim());
+                lastLine = lines[lines.length - 1]?.trim() || "";
+                break;
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+    if (!lastLine) {
+      const capture = tmuxCapture(name, 10);
+      if (capture) {
+        const capLines = capture.split("\n").filter((l) => l.trim());
+        lastLine = capLines[capLines.length - 1]?.trim() || "";
+      }
+    }
+    if (lastLine.length > 80) lastLine = lastLine.slice(0, 77) + "...";
 
     console.log(
-      `  ${statusIcon} ${fmt.BOLD}${name}${fmt.NC}  ${fmt.DIM}(${statusText})${fmt.NC}`,
+      `  ${statusIcon} ${fmt.BOLD}${name}${fmt.NC}  ${fmt.DIM}(${statusText})${fmt.NC}${runtime ? `  ${fmt.DIM}${runtime}${fmt.NC}` : ""}`,
     );
-    console.log(`    ${fmt.DIM}path: ${shortPath}${fmt.NC}`);
+    if (lastLine) {
+      console.log(`    ${fmt.DIM}⤷ ${lastLine}${fmt.NC}`);
+    }
   }
 
   console.log();

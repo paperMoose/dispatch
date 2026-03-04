@@ -237,8 +237,11 @@ export function tmuxListWindows(): string {
     const paneInfo = execQuiet(
       `tmux list-panes -t "${session}" -F "#{pane_pid}|#{pane_current_path}|#{pane_dead}"`,
     );
+    const created = execQuiet(
+      `tmux display-message -t "${session}" -p "#{session_created}"`,
+    );
     const info = paneInfo?.split("\n")[0] || "||";
-    results.push(`${id}|${info}`);
+    results.push(`${id}|${info}|${created || ""}`);
   }
   return results.join("\n");
 }
@@ -287,9 +290,9 @@ function openTerminalTabAppleScript(target: string): string | null {
     {
       name: "cmux",
       bundleId: "ai.manaflow.cmux",
-      script: `tell application "cmux"
-        activate
-        tell application "System Events" to tell process "cmux"
+      script: `tell application "System Events"
+        set frontmost of process "cmux" to true
+        tell process "cmux"
           keystroke "t" using command down
           delay 0.3
           keystroke "TERM_PROGRAM=dumb tmux attach -t ${target}"
