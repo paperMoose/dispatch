@@ -1,30 +1,21 @@
 # dispatch
 
-CLI tool for orchestrating Claude Code agents in git worktrees. Dispatch work from Linear tickets or free text, run agents in named terminal tabs or headless.
-
-## The Problem
-
-You're running 15 Claude Code sessions and your terminal looks like this:
+Multiplex Claude Code agents from a single conversation. Fan out work across tickets, each agent opens in its own terminal tab on its own branch, then fold results back in when they're done.
 
 ```
-* Unit... | * App... | * Prod... | * DOI... | * Prof... | * Mov... | * Code...
+You: "Work on HEY-837, HEY-842, and HEY-845"
+
+Claude (main session)
+  ├── dispatch_run HEY-837  →  [Tab: HEY-837] agent working on eval improvements
+  ├── dispatch_run HEY-842  →  [Tab: HEY-842] agent fixing auth bug
+  └── dispatch_run HEY-845  →  [Tab: HEY-845] agent adding retry logic
+
+You: "How's HEY-837 doing?"
+
+Claude: *calls dispatch_logs* → "It's done, pushed to branch hey-837. Want me to open a PR?"
 ```
 
-Which tab is doing what? No idea.
-
-## The Solution
-
-```bash
-dispatch run HEY-837                    # Opens named tab: "HEY-837: eval improvements"
-dispatch run HEY-842 --headless         # Runs in background
-dispatch list                           # See all agents + status
-```
-
-Each agent gets:
-- Its own **git worktree** (isolated branch, no conflicts)
-- A **named tmux window** that shows as an iTerm2 tab
-- **Color-coded tabs** so you can tell them apart at a glance
-- Optional **headless mode** for fire-and-forget tasks
+No tab switching. No copy-pasting prompts. No manually creating branches. Your main Claude session orchestrates everything — spinning up agents, checking progress, and pulling results back in.
 
 ## Install
 
@@ -47,15 +38,21 @@ npm link
 - `tmux` — `brew install tmux`
 - `claude` — [Claude Code CLI](https://code.claude.com)
 - `git` — for worktree management
-- iTerm2 (recommended) — for native tab integration via `tmux -CC`
 
-## MCP Server
+### Supported terminals
 
-Dispatch includes an MCP server so Claude Code can orchestrate agents directly — no shell commands needed.
+Dispatch auto-detects your terminal and opens native tabs:
+
+- **cmux** — built for AI coding agents, first-class support
+- **iTerm2** — native tab integration
+- **Warp** — tab support via keystroke automation
+- **Terminal.app** — fallback
+
+## MCP Server (recommended)
+
+The MCP server lets Claude Code spin up agents directly — this is the primary way to use dispatch.
 
 ### Setup
-
-After installing dispatch, register the MCP server with Claude Code:
 
 ```bash
 claude mcp add --scope user dispatch node $(which dispatch-mcp)
@@ -65,7 +62,7 @@ This exposes 6 tools to Claude Code:
 
 | Tool | Description |
 |------|-------------|
-| `dispatch_run` | Launch an agent with a prompt (inline text, not a file) |
+| `dispatch_run` | Launch an agent with a prompt |
 | `dispatch_list` | List all running agents with status |
 | `dispatch_stop` | Stop a running agent |
 | `dispatch_resume` | Resume a stopped agent |
@@ -74,19 +71,31 @@ This exposes 6 tools to Claude Code:
 
 ### How it works
 
-The MCP server wraps the dispatch CLI over stdio using the [Model Context Protocol](https://modelcontextprotocol.io). When Claude Code calls `dispatch_run`, the server writes the prompt to a temp file, runs `dispatch run --prompt-file <file>`, and cleans up. Interactive agents open iTerm tabs; headless agents run in the background.
+Add dispatch instructions to your `CLAUDE.md` and Claude will use the MCP tools to fan out work. Example interaction:
+
+```
+You:    "Work on HEY-837, HEY-842, and HEY-845"
+Claude: *calls dispatch_run for each ticket*
+        *three terminal tabs open, each with an agent working on its own branch*
+Claude: "I've launched 3 agents. HEY-837 is working on eval improvements,
+         HEY-842 is fixing the auth bug, HEY-845 is adding retry logic."
+```
+
+Each agent gets its own git worktree so there are no merge conflicts between parallel agents.
 
 ### Working directory
 
-By default the MCP server uses the directory Claude Code is running in. To override, set `DISPATCH_CWD`:
+By default the MCP server uses the directory Claude Code is running in. To override:
 
 ```bash
 claude mcp add --scope user dispatch -e DISPATCH_CWD=/path/to/repo node $(which dispatch-mcp)
 ```
 
-## Usage
+## CLI Usage
 
-### Launch an agent
+You can also use dispatch directly from the command line.
+
+### Launch agents
 
 ```bash
 # From a Linear ticket (fetches title + description as prompt)
@@ -95,65 +104,53 @@ dispatch run HEY-837
 # Free text prompt
 dispatch run "Fix the auth bug in login.py"
 
-# Headless (background mode)
+# Batch launch
+dispatch run HEY-837 HEY-842 HEY-845
+
+# Headless (background, no tab)
 dispatch run HEY-837 --headless
 
 # With options
 dispatch run HEY-837 --model sonnet --max-turns 10 --base main
 ```
 
-### Monitor agents
+### Monitor
 
 ```bash
-# List all running agents with status
-dispatch list
-
-# Tail logs from a headless agent
-dispatch logs HEY-837
-
-# Attach to the tmux session (see all tabs)
-dispatch attach
+dispatch list                  # All agents + status
+dispatch logs HEY-837          # Tail headless agent output
+dispatch attach HEY-837        # Jump to agent's terminal
 ```
 
-### Manage agents
+### Manage
 
 ```bash
-# Stop an agent (keeps worktree)
-dispatch stop HEY-837
-
-# Resume a stopped agent
-dispatch resume HEY-837
-
-# Clean up worktree + branch
-dispatch cleanup HEY-837
-
-# Clean up everything
-dispatch cleanup --all
+dispatch stop HEY-837          # Stop agent (keeps worktree)
+dispatch resume HEY-837        # Pick up where it left off
+dispatch cleanup HEY-837       # Remove worktree + branch
+dispatch cleanup --all          # Clean up everything
 ```
 
 ## How It Works
 
 ```
 dispatch run HEY-837
-  |
-  |-- 1. Fetch ticket from Linear (title + description)
-  |-- 2. git worktree add -b hey-837 .worktrees/hey-837 origin/dev
-  |-- 3. tmux new-window -n "HEY-837" (becomes iTerm2 tab)
-  |-- 4. Set tab color + badge
-  |-- 5. Launch Claude Code with ticket as prompt
-  |
-  v
-  Agent works in isolated worktree, commits, pushes
+  │
+  ├── 1. Fetch ticket from Linear (title + description)
+  ├── 2. git worktree add -b hey-837 .worktrees/hey-837 origin/dev
+  ├── 3. Create tmux session → opens as terminal tab
+  ├── 4. Launch Claude Code with ticket as prompt
+  │
+  └── Agent works in isolated worktree, commits, pushes
 ```
 
 ### Interactive vs Headless
 
 | | Interactive | Headless |
 |---|---|---|
-| **Tab** | Named iTerm2 tab you can watch | Detached tmux window |
+| **Terminal** | Named tab you can watch | Detached tmux session |
 | **Interaction** | You can type into Claude Code | Fire and forget |
 | **Output** | Live in the tab | `dispatch logs <id>` |
-| **Safety** | Claude Code permission prompts | `--allowedTools` pre-approved |
 | **Use case** | Complex tasks, review as you go | Simple/well-defined tasks |
 
 ## Configuration
@@ -173,24 +170,6 @@ base_branch: dev
 model: opus
 max_turns: 20
 worktree_dir: .worktrees
-```
-
-## iTerm2 Integration
-
-Dispatch uses `tmux -CC` when it detects iTerm2, which maps tmux windows to native iTerm2 tabs. This means:
-
-- Each agent gets a real iTerm2 tab with a clear name
-- Tabs are color-coded to tell agents apart
-- iTerm2 badges show the ticket ID as an overlay
-- Sessions survive terminal crashes (tmux persistence)
-
-### Tab naming
-
-Disable automatic title overrides in your shell:
-
-```bash
-# Add to ~/.zshrc
-DISABLE_AUTO_TITLE="true"
 ```
 
 ## License
