@@ -235,7 +235,7 @@ export function tmuxListWindows(): string {
   for (const session of sessions) {
     const id = session.slice(prefix.length);
     const paneInfo = execQuiet(
-      `tmux list-panes -t "${session}" -F "#{pane_current_command}|#{pane_current_path}|#{pane_dead}"`,
+      `tmux list-panes -t "${session}" -F "#{pane_pid}|#{pane_current_path}|#{pane_dead}"`,
     );
     const info = paneInfo?.split("\n")[0] || "||";
     results.push(`${id}|${info}`);

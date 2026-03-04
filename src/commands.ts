@@ -330,7 +330,7 @@ export function cmdList(config: Config): void {
 
   for (const line of lines.split("\n")) {
     if (!line) continue;
-    const [name, cmd, path, dead] = line.split("|");
+    const [name, pid, path, dead] = line.split("|");
     if (name === "dispatch") continue; // Skip control window
 
     let statusIcon: string;
@@ -338,7 +338,8 @@ export function cmdList(config: Config): void {
     if (dead === "1") {
       statusIcon = `${fmt.RED}●${fmt.NC}`;
       statusText = "exited";
-    } else if (cmd === "claude" || cmd === "node") {
+    } else if (pid && execQuiet(`pgrep -P ${pid}`) !== null) {
+      // Shell has child processes — agent is running
       statusIcon = `${fmt.GREEN}●${fmt.NC}`;
       statusText = "running";
     } else {
