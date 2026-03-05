@@ -48,13 +48,12 @@ import type { AgentState } from "./cmux.js";
 
 export const TICKET_RE = /^[A-Z]+-[0-9]+$/;
 
-/** Update cmux workspace state: color + status + sidebar log. */
+/** Update cmux workspace state: color + icon + status + sidebar log. */
 function cmuxUpdateState(id: string, wtPath: string, state: AgentState, message?: string): void {
   if (!useCmux()) return;
   const wsId = getCmuxWorkspaceId(id) || loadCmuxWorkspaceId(wtPath);
   if (!wsId) return;
-  cmuxSetWorkspaceColor(wsId, state);
-  cmuxSetStatus(wsId, "dispatch", state);
+  cmuxSetWorkspaceColor(wsId, state);  // sets status with color + icon + notify
   if (message) cmuxLog(wsId, message);
 }
 
@@ -197,13 +196,14 @@ async function launchAgent(
       waitForClaude(id, config.claudeTimeout);
       // Extra settle time — Claude's TUI needs a moment before accepting input
       spawnSync("sleep", ["2"]);
-      cmuxUpdateState(id, wtPath, "running", "Claude ready, sending prompt");
+      cmuxUpdateState(id, wtPath, "starting", "Claude ready, sending prompt");
 
       // Save prompt to file for reference
       const pf = join(wtPath, ".dispatch-prompt.txt");
       writeFileSync(pf, prompt);
       // Send prompt via cmux send (types text + Enter)
       cmuxSend(wsId!, prompt);
+      cmuxUpdateState(id, wtPath, "running", "Prompt sent — agent working");
     } else {
       const logFile = join(wtPath, ".dispatch.log");
       cmuxUpdateState(id, wtPath, "running", "Headless agent started");
