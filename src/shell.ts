@@ -244,6 +244,8 @@ export function createSession(id: string, cwd: string): boolean {
     saveCmuxWorkspaceId(cwd, workspaceId);
     cmuxSetStatus(workspaceId, "dispatch", "starting", { color: "#2E86AB" });
     // Auto-prune hook: when the workspace closes, notify dispatch
+    // Note: cmux sandbox may block /bin/sh — this hook is best-effort.
+    // The _notify-done command also runs at end of headless agents via the command chain.
     cmuxSetHook(workspaceId, "pane-exited", `dispatch _notify-done ${id}`);
     return true;
   }
