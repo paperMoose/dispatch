@@ -195,24 +195,15 @@ async function launchAgent(
       const modelFlag = config.model ? `--model ${config.model}` : "";
       cmuxSend(wsId!, `unset CLAUDECODE && claude ${modelFlag}`);
       waitForClaude(id, config.claudeTimeout);
-      // Extra settle time — Claude's TUI may not accept paste immediately after showing prompt
+      // Extra settle time — Claude's TUI needs a moment before accepting input
       spawnSync("sleep", ["2"]);
       cmuxUpdateState(id, wtPath, "running", "Claude ready, sending prompt");
 
-      // Paste prompt via cmux buffer, then press Enter to submit
+      // Save prompt to file for reference
       const pf = join(wtPath, ".dispatch-prompt.txt");
       writeFileSync(pf, prompt);
-      let pasted = cmuxPasteBuffer(wsId!, prompt);
-      if (!pasted) {
-        // Retry once after a short delay
-        spawnSync("sleep", ["1"]);
-        pasted = cmuxPasteBuffer(wsId!, prompt);
-      }
-      if (!pasted) {
-        log.warn(`Paste buffer failed for ${id} — falling back to send`);
-        cmuxSend(wsId!, prompt);
-      }
-      cmuxSendKey(wsId!, "enter");
+      // Send prompt via cmux send (types text + Enter)
+      cmuxSend(wsId!, prompt);
     } else {
       const logFile = join(wtPath, ".dispatch.log");
       cmuxUpdateState(id, wtPath, "running", "Headless agent started");
@@ -954,16 +945,18 @@ export function cmdNotifyDone(args: string[], config: Config): void {
 const CLAUDE_MD_SNIPPET = `
 ## Dispatch (multi-agent orchestration)
 
-Launch Claude Code agents in isolated git worktrees. Each agent gets its own branch, so it can make changes without affecting your working tree or other agents. Agents run inside tmux — interactive mode to watch/guide, headless for fire-and-forget.
+Launch Claude Code agents in isolated git worktrees. Each agent gets its own branch, so it can make changes without affecting your working tree or other agents. Agents run inside tmux or cmux — interactive mode to watch/guide, headless for fire-and-forget.
+
+**Default model: Opus.** All agents use Opus unless you explicitly pass \`--model sonnet\` or \`--model haiku\`. Do not use Sonnet unless specifically requested.
 
 **When to use:** Hand off well-defined tasks (Linear tickets, bug fixes, features) to a parallel agent while you keep working. Avoid dispatching two agents to the same files — they'll create merge conflicts.
 
 \`\`\`bash
-# Launch agents
+# Launch agents (all use Opus by default)
 dispatch run HEY-123                                  # From Linear ticket (auto-fetches title + description)
 dispatch run "Fix the auth bug" --name HEY-879        # Free text with custom branch name (hey-879)
 dispatch run HEY-123 --headless                       # Background — check with: dispatch logs HEY-123
-dispatch run HEY-123 -m sonnet --max-turns 20         # Sonnet, 20 turn limit
+dispatch run HEY-123 --max-turns 20                   # Opus with 20 turn limit
 dispatch run HEY-123 HEY-124 HEY-125                 # Batch launch in parallel
 
 # Monitor and interact
@@ -976,12 +969,13 @@ dispatch stop HEY-123                                 # Interrupt agent (worktre
 dispatch resume HEY-123                               # Pick up where it left off (--continue)
 dispatch cleanup HEY-123 --delete-branch              # Remove worktree + branch
 dispatch cleanup --all --delete-branch                # Clean up everything
+dispatch prune --merged --delete-branch               # Remove worktrees with merged PRs
 \`\`\`
 
-**Key flags:** \`--name/-n\` sets branch name, \`--model/-m\` picks model, \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev.
+**Key flags:** \`--name/-n\` sets branch name, \`--model/-m\` picks model (default: opus), \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev.
 
 Config: \`~/.dispatch.yml\` (base_branch, model, max_turns, max_budget, worktree_dir, claude_timeout).
-Requires: tmux, claude CLI, git.
+Requires: tmux or cmux, claude CLI, git.
 `;
 
 export function cmdSetup(): void {

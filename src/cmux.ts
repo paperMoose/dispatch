@@ -268,31 +268,26 @@ export function cmuxClearProgress(workspaceId: string): boolean {
 // ---------------------------------------------------------------------------
 // Workspace color coding
 // ---------------------------------------------------------------------------
-const WORKSPACE_COLORS = {
-  starting: "#2E86AB",    // blue — initializing
-  running: "#44BBA4",     // green — agent working
-  waiting: "#F18F01",     // amber — needs input
-  done: "#6C757D",        // gray — finished
-  error: "#E94F37",       // red — failed
-  merged: "#A23B72",      // purple — PR merged
+const WORKSPACE_STATES: Record<string, { color: string; icon: string; notify: boolean }> = {
+  starting:  { color: "#2E86AB", icon: "hourglass",          notify: false },
+  running:   { color: "#44BBA4", icon: "bolt.fill",          notify: false },
+  waiting:   { color: "#F18F01", icon: "exclamationmark.bubble.fill", notify: true },
+  done:      { color: "#6C757D", icon: "checkmark.circle.fill",      notify: true },
+  error:     { color: "#E94F37", icon: "xmark.octagon.fill",         notify: true },
+  merged:    { color: "#A23B72", icon: "arrow.triangle.merge",       notify: true },
 };
 
-export type AgentState = keyof typeof WORKSPACE_COLORS;
+export type AgentState = keyof typeof WORKSPACE_STATES;
 
-/** Set workspace color based on agent state. */
+/** Set workspace state: status color + icon in sidebar, notify if attention needed. */
 export function cmuxSetWorkspaceColor(workspaceId: string, state: AgentState): boolean {
-  const color = WORKSPACE_COLORS[state];
-  // Try set-color command directly
-  const r = cmux(["set-color", color, "--workspace", workspaceId]);
-  if (!r.ok) {
-    // Fallback: try alternate arg order
-    const r2 = cmux(["set-color", "--workspace", workspaceId, "--color", color]);
-    if (!r2.ok) {
-      // Last resort: set-status with color option (colors the status text, not the tab)
-      return cmuxSetStatus(workspaceId, "dispatch", state, { color });
-    }
+  const s = WORKSPACE_STATES[state];
+  if (!s) return false;
+  const ok = cmuxSetStatus(workspaceId, "dispatch", state, { color: s.color, icon: s.icon });
+  if (s.notify) {
+    cmuxNotify(`dispatch: ${state}`, { workspaceId });
   }
-  return true;
+  return ok;
 }
 
 // ---------------------------------------------------------------------------

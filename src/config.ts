@@ -14,7 +14,7 @@ export interface Config {
 
 const DEFAULTS: Config = {
   baseBranch: "dev",
-  model: "",
+  model: "opus",
   maxTurns: "",
   maxBudget: "",
   allowedTools:
