@@ -161,6 +161,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["agent_id"],
       },
     },
+    {
+      name: "dispatch_prune",
+      description:
+        "Remove stale worktrees. Use merged=true to prune agents whose PRs have been merged " +
+        "(stops sessions, removes worktrees and branches). Use dry_run=true to preview.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          merged: {
+            type: "boolean",
+            description: "Only prune agents whose branches/PRs have been merged. Default: true.",
+          },
+          delete_branch: {
+            type: "boolean",
+            description: "Also delete the git branch. Default: true.",
+          },
+          dry_run: {
+            type: "boolean",
+            description: "Preview what would be pruned without removing anything.",
+          },
+        },
+      },
+    },
   ],
 }));
 
@@ -199,7 +222,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "dispatch_list": {
-      const output = dispatch("list");
+      const output = dispatch("list --brief");
       return {
         content: [{ type: "text", text: output || "No agents running." }],
       };
@@ -262,6 +285,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+    }
+
+    case "dispatch_prune": {
+      const { merged = true, delete_branch = true, dry_run } = args as Record<string, any>;
+      const parts = ["prune"];
+      if (merged) parts.push("--merged");
+      if (delete_branch) parts.push("--delete-branch");
+      if (dry_run) parts.push("--dry-run");
+      const output = dispatch(parts.join(" "));
+      return { content: [{ type: "text", text: output }] };
     }
 
     default:

@@ -1,7 +1,36 @@
 import { execSync, spawnSync, spawn, type ChildProcess } from "child_process";
-import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync } from "fs";
 import { join, basename } from "path";
 import type { Config } from "./config.js";
+import {
+  isCmuxAvailable,
+  cmuxNewWorkspace,
+  cmuxRenameWorkspace,
+  cmuxCloseWorkspace,
+  cmuxListWorkspaces,
+  parseCmuxWorkspaces,
+  cmuxSelectWorkspace,
+  cmuxSend,
+  cmuxSendKey,
+  cmuxReadScreen,
+  cmuxPasteBuffer,
+  cmuxNotify,
+  cmuxSetStatus,
+  cmuxClearStatus,
+  cmuxSetProgress,
+  cmuxClearProgress,
+  saveCmuxWorkspaceId,
+  loadCmuxWorkspaceId,
+} from "./cmux.js";
+
+// ---------------------------------------------------------------------------
+// Multiplexer detection — prefer cmux over tmux when available
+// ---------------------------------------------------------------------------
+let _useCmux: boolean | undefined;
+export function useCmux(): boolean {
+  if (_useCmux === undefined) _useCmux = isCmuxAvailable();
+  return _useCmux;
+}
 
 // ---------------------------------------------------------------------------
 // ANSI colors
@@ -151,25 +180,66 @@ export function removeWorktree(id: string, config: Config): boolean {
 // ---------------------------------------------------------------------------
 // tmux helpers
 // ---------------------------------------------------------------------------
-export function ensureTmux(): void {
+export function ensureMultiplexer(): void {
+  if (useCmux()) {
+    log.dim("Using cmux as multiplexer backend");
+    return;
+  }
   const r = spawnSync("command", ["-v", "tmux"], { shell: true, stdio: "pipe" });
   if (r.status !== 0) {
-    log.error("tmux is required. Install with: brew install tmux");
+    log.error("tmux is required (or install cmux). Install with: brew install tmux");
     process.exit(1);
   }
 }
 
+/** @deprecated Use ensureMultiplexer instead */
+export const ensureTmux = ensureMultiplexer;
+
 export function sessionExists(id: string): boolean {
+  if (useCmux()) {
+    return cmuxWorkspaceExists(id);
+  }
   const r = spawnSync("tmux", ["has-session", "-t", sessionName(id)], {
     stdio: "pipe",
   });
   return r.status === 0;
 }
 
+function cmuxWorkspaceExists(id: string): boolean {
+  // Primary: check marker file in worktree
+  const root = execQuiet("git rev-parse --show-toplevel") || "";
+  if (root) {
+    const wtPath = join(root, ".worktrees", id);
+    const wsId = existsSync(wtPath) ? loadCmuxWorkspaceId(wtPath) : null;
+    if (wsId) {
+      // Verify the workspace still exists in cmux
+      const workspaces = parseCmuxWorkspaces();
+      return workspaces.some(w => w.ref === wsId);
+    }
+  }
+  // Fallback: fuzzy title match (cmux truncates long titles)
+  const workspaces = parseCmuxWorkspaces();
+  return workspaces.some(w => w.title === id || w.title.startsWith(id.slice(0, 15)));
+}
+
 export function createSession(id: string, cwd: string): boolean {
   if (sessionExists(id)) {
     log.warn(`Session '${id}' already exists`);
     return false;
+  }
+
+  if (useCmux()) {
+    const workspaceId = cmuxNewWorkspace();
+    if (!workspaceId) {
+      log.error("Failed to create cmux workspace");
+      process.exit(1);
+    }
+    cmuxRenameWorkspace(workspaceId, id);
+    // cd into the worktree directory
+    cmuxSend(workspaceId, `cd '${cwd}'`);
+    saveCmuxWorkspaceId(cwd, workspaceId);
+    cmuxSetStatus(workspaceId, "dispatch", "starting", { color: "#2E86AB" });
+    return true;
   }
 
   const session = sessionName(id);
@@ -192,6 +262,9 @@ export function createSession(id: string, cwd: string): boolean {
   execQuiet(`tmux setw -t "${session}" allow-passthrough on`);
   execQuiet(`tmux setw -t "${session}" automatic-rename off`);
 
+  // Auto-prune hook: when the session is destroyed, check if branch was merged
+  execQuiet(`tmux set-hook -t "${session}" session-closed "run-shell 'dispatch _notify-done ${id}'"`);
+
   return true;
 }
 
@@ -204,14 +277,29 @@ export function tmuxTarget(id: string): string {
 }
 
 export function tmuxSendKeys(id: string, keys: string): void {
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(id);
+    if (wsId) cmuxSendKey(wsId, keys === "C-c" ? "ctrl-c" : keys);
+    return;
+  }
   execSync(`tmux send-keys -t "${tmuxTarget(id)}" ${keys}`);
 }
 
 export function tmuxSendText(id: string, text: string): void {
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(id);
+    if (wsId) cmuxSend(wsId, text);
+    return;
+  }
   execSync(`tmux send-keys -t "${tmuxTarget(id)}" "${text}" Enter`);
 }
 
 export function tmuxCapture(id: string, lines: number): string {
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(id);
+    if (wsId) return cmuxReadScreen(wsId, lines, true);
+    return "";
+  }
   return (
     execQuiet(
       `tmux capture-pane -t "${tmuxTarget(id)}" -p -S -${lines}`,
@@ -220,10 +308,18 @@ export function tmuxCapture(id: string, lines: number): string {
 }
 
 export function tmuxKillWindow(id: string): void {
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(id);
+    if (wsId) cmuxCloseWorkspace(wsId);
+    return;
+  }
   execQuiet(`tmux kill-session -t "${tmuxTarget(id)}"`);
 }
 
 export function tmuxListWindows(): string {
+  if (useCmux()) {
+    return cmuxListDispatchWorkspaces();
+  }
   // List all dispatch-* sessions, format to match old window-based output
   const out = execQuiet(
     `tmux list-sessions -F "#{session_name}" 2>/dev/null`,
@@ -247,6 +343,9 @@ export function tmuxListWindows(): string {
 }
 
 export function tmuxHasSession(): boolean {
+  if (useCmux()) {
+    return cmuxListDispatchWorkspaces() !== "";
+  }
   // Check if any dispatch sessions exist
   const out = execQuiet(
     `tmux list-sessions -F "#{session_name}" 2>/dev/null`,
@@ -255,11 +354,56 @@ export function tmuxHasSession(): boolean {
   return out.split("\n").some((s) => s.startsWith(`${DISPATCH_SESSION}-`));
 }
 
+/** List cmux workspaces that belong to dispatch, formatted for cmdList.
+ *  We scan worktree directories for the .dispatch-cmux-workspace marker file,
+ *  then verify the workspace still exists in cmux. */
+function cmuxListDispatchWorkspaces(): string {
+  const root = execQuiet("git rev-parse --show-toplevel") || "";
+  if (!root) return "";
+
+  const wtDir = join(root, ".worktrees");
+  if (!existsSync(wtDir)) return "";
+
+  let entries: string[];
+  try {
+    entries = readdirSync(wtDir, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+  } catch { return ""; }
+
+  const workspaces = parseCmuxWorkspaces();
+  const results: string[] = [];
+
+  for (const name of entries) {
+    const wtPath = join(wtDir, name);
+    const wsId = loadCmuxWorkspaceId(wtPath);
+    if (!wsId) continue;
+    // Verify workspace still exists in cmux
+    const ws = workspaces.find(w => w.ref === wsId);
+    if (!ws) continue;
+    // Format: name|pid|path|dead|created
+    results.push(`${name}||${wtPath}|0|`);
+  }
+  return results.join("\n");
+}
+
 export function tmuxAttach(window?: string): void {
   if (!window) {
     log.error("Agent ID required for attach");
     return;
   }
+
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(window);
+    if (wsId) {
+      cmuxSelectWorkspace(wsId);
+      log.ok(`Focused cmux workspace: ${window}`);
+    } else {
+      log.error(`cmux workspace not found for agent: ${window}`);
+    }
+    return;
+  }
+
   const target = sessionName(window);
   const hasTTY = process.stdin.isTTY;
 
@@ -405,20 +549,65 @@ export async function fetchLinearTicket(
 // ---------------------------------------------------------------------------
 // Notifications
 // ---------------------------------------------------------------------------
-export function notify(title: string, message: string): void {
+export function notify(title: string, message: string, agentId?: string): void {
+  if (useCmux()) {
+    const wsId = agentId ? getCmuxWorkspaceId(agentId) : undefined;
+    cmuxNotify(title, {
+      body: message,
+      workspaceId: wsId || undefined,
+    });
+    // Also update sidebar status
+    if (wsId) {
+      cmuxSetStatus(wsId, "dispatch", "done", { color: "#44BBA4" });
+      cmuxClearProgress(wsId);
+    }
+    return;
+  }
   execQuiet(
     `osascript -e 'display notification "${message}" with title "${title}" sound name "Glass"'`,
   );
 }
 
 // ---------------------------------------------------------------------------
+// cmux workspace ID lookup
+// ---------------------------------------------------------------------------
+
+/** Resolve agent ID to a cmux workspace ID by checking worktree marker files. */
+function getCmuxWorkspaceId(id: string): string | null {
+  // Primary: check marker file in worktree
+  const cwd = process.env.DISPATCH_CWD || process.cwd();
+  const root = execQuiet("git rev-parse --show-toplevel") || cwd;
+  const wtPath = join(root, ".worktrees", id);
+  if (existsSync(wtPath)) {
+    const wsId = loadCmuxWorkspaceId(wtPath);
+    if (wsId) return wsId;
+  }
+  // Fallback: search by workspace title (exact or prefix match, since cmux truncates)
+  const workspaces = parseCmuxWorkspaces();
+  const ws = workspaces.find(w => w.title === id) ||
+    workspaces.find(w => id.startsWith(w.title) || w.title.startsWith(id.slice(0, 15)));
+  return ws?.ref || null;
+}
+
+export { getCmuxWorkspaceId };
+
+// ---------------------------------------------------------------------------
 // Claude readiness
 // ---------------------------------------------------------------------------
 export function waitForClaude(id: string, timeout: number): void {
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(id);
+    if (wsId) cmuxSetStatus(wsId, "dispatch", "initializing", { color: "#F18F01" });
+  }
+
   let waited = 0;
   while (waited < timeout) {
     const content = tmuxCapture(id, 5);
     if (/^\s*[>?]\s*$/m.test(content) || /╭|Welcome|claude/i.test(content)) {
+      if (useCmux()) {
+        const wsId = getCmuxWorkspaceId(id);
+        if (wsId) cmuxSetStatus(wsId, "dispatch", "running", { color: "#44BBA4" });
+      }
       return;
     }
     spawnSync("sleep", ["1"]);

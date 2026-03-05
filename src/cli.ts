@@ -6,12 +6,14 @@ import {
   cmdStop,
   cmdResume,
   cmdCleanup,
+  cmdPrune,
+  cmdDashboard,
   cmdAttach,
   cmdNotifyDone,
   cmdSetup,
 } from "./commands.js";
 
-const VERSION = "0.4.1";
+const VERSION = "0.5.6";
 
 function help(): void {
   console.log(`dispatch — Launch Claude Code agents in isolated git worktrees
@@ -28,6 +30,7 @@ Commands:
   dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
   dispatch cleanup --all [--delete-branch] Remove all worktrees
+  dispatch prune [--delete-branch]         Remove worktrees with no active session
   dispatch attach [id]                     Open tmux session (or jump to specific agent)
   dispatch setup                           Add dispatch docs to ~/.claude/CLAUDE.md
 
@@ -98,19 +101,25 @@ async function main(): Promise<void> {
       break;
     case "list":
     case "ls":
-      cmdList(config);
+      cmdList(config, rest.includes("--brief"));
       break;
     case "logs":
       cmdLogs(rest, config);
       break;
     case "stop":
-      cmdStop(rest);
+      cmdStop(rest, config);
       break;
     case "resume":
       cmdResume(rest, config);
       break;
     case "cleanup":
       cmdCleanup(rest, config);
+      break;
+    case "prune":
+      cmdPrune(rest, config);
+      break;
+    case "dashboard":
+      cmdDashboard(config);
       break;
     case "attach":
       cmdAttach(rest);
@@ -119,7 +128,7 @@ async function main(): Promise<void> {
       cmdSetup();
       break;
     case "_notify-done":
-      cmdNotifyDone(rest);
+      cmdNotifyDone(rest, config);
       break;
     case "version":
     case "-v":

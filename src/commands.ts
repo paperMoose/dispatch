@@ -13,6 +13,8 @@ import {
   createWorktree,
   removeWorktree,
   ensureTmux,
+  ensureMultiplexer,
+  useCmux,
   sessionExists,
   createSession,
   tmuxTarget,
@@ -26,9 +28,35 @@ import {
   notify,
   waitForClaude,
   tailFile,
+  getCmuxWorkspaceId,
 } from "./shell.js";
+import {
+  cmuxSend,
+  cmuxSendKey,
+  cmuxPasteBuffer,
+  cmuxSetStatus,
+  cmuxSetProgress,
+  cmuxClearProgress,
+  cmuxOpenBrowser,
+  cmuxSetWorkspaceColor,
+  cmuxLog,
+  cmuxOpenMarkdown,
+  loadCmuxWorkspaceId,
+  tryCmuxCloseFromMarker,
+} from "./cmux.js";
+import type { AgentState } from "./cmux.js";
 
 export const TICKET_RE = /^[A-Z]+-[0-9]+$/;
+
+/** Update cmux workspace state: color + status + sidebar log. */
+function cmuxUpdateState(id: string, wtPath: string, state: AgentState, message?: string): void {
+  if (!useCmux()) return;
+  const wsId = getCmuxWorkspaceId(id) || loadCmuxWorkspaceId(wtPath);
+  if (!wsId) return;
+  cmuxSetWorkspaceColor(wsId, state);
+  cmuxSetStatus(wsId, "dispatch", state);
+  if (message) cmuxLog(wsId, message);
+}
 
 /** Turn any string into a short, kebab-case slug suitable for branch/window names. */
 function slugify(text: string): string {
@@ -159,7 +187,38 @@ async function launchAgent(
   const mode = headless ? "headless" : "interactive";
   const claudeCmd = buildClaudeCmd(prompt, mode, wtPath, config, extraArgs);
 
-  if (mode === "interactive") {
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(id) || loadCmuxWorkspaceId(wtPath);
+    cmuxUpdateState(id, wtPath, "starting", `Launching agent (${mode})`);
+
+    if (mode === "interactive") {
+      const modelFlag = config.model ? `--model ${config.model}` : "";
+      cmuxSend(wsId!, `unset CLAUDECODE && claude ${modelFlag}`);
+      waitForClaude(id, config.claudeTimeout);
+      // Extra settle time — Claude's TUI may not accept paste immediately after showing prompt
+      spawnSync("sleep", ["2"]);
+      cmuxUpdateState(id, wtPath, "running", "Claude ready, sending prompt");
+
+      // Paste prompt via cmux buffer, then press Enter to submit
+      const pf = join(wtPath, ".dispatch-prompt.txt");
+      writeFileSync(pf, prompt);
+      let pasted = cmuxPasteBuffer(wsId!, prompt);
+      if (!pasted) {
+        // Retry once after a short delay
+        spawnSync("sleep", ["1"]);
+        pasted = cmuxPasteBuffer(wsId!, prompt);
+      }
+      if (!pasted) {
+        log.warn(`Paste buffer failed for ${id} — falling back to send`);
+        cmuxSend(wsId!, prompt);
+      }
+      cmuxSendKey(wsId!, "enter");
+    } else {
+      const logFile = join(wtPath, ".dispatch.log");
+      cmuxUpdateState(id, wtPath, "running", "Headless agent started");
+      cmuxSend(wsId!, `unset CLAUDECODE && ${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}`);
+    }
+  } else if (mode === "interactive") {
     // Launch claude, wait for it to be ready, then send prompt via paste-buffer
     const modelFlag = config.model ? `--model ${config.model}` : "";
     execSync(
@@ -285,7 +344,7 @@ export async function cmdRun(
     inputs.push("prompt-file");
   }
 
-  ensureTmux();
+  ensureMultiplexer();
 
   if (inputs.length > 1) {
     log.info(`Batch launching ${inputs.length} agents...`);
@@ -311,40 +370,44 @@ export async function cmdRun(
   }
 }
 
-export function cmdList(config: Config): void {
-  ensureTmux();
+export function cmdList(config: Config, brief = false): void {
+  ensureMultiplexer();
 
   if (!tmuxHasSession()) {
     log.info("No dispatch session running");
     return;
   }
 
-  console.log();
-  console.log(`${fmt.BOLD}Running Agents${fmt.NC}`);
-  console.log(
-    `${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`,
-  );
-
   const root = execQuiet("git rev-parse --show-toplevel") || "";
   const lines = tmuxListWindows();
+
+  interface AgentInfo {
+    name: string;
+    status: string;
+    statusIcon: string;
+    runtime: string;
+    lastLine: string;
+    pr: string;
+  }
+
+  const agents: AgentInfo[] = [];
 
   for (const line of lines.split("\n")) {
     if (!line) continue;
     const [name, pid, path, dead, created] = line.split("|");
-    if (name === "dispatch") continue; // Skip control window
+    if (name === "dispatch") continue;
 
     let statusIcon: string;
-    let statusText: string;
+    let status: string;
     if (dead === "1") {
       statusIcon = `${fmt.RED}●${fmt.NC}`;
-      statusText = "exited";
+      status = "exited";
     } else if (pid && execQuiet(`pgrep -P ${pid}`) !== null) {
-      // Shell has child processes — agent is running
       statusIcon = `${fmt.GREEN}●${fmt.NC}`;
-      statusText = "running";
+      status = "running";
     } else {
       statusIcon = `${fmt.YELLOW}●${fmt.NC}`;
-      statusText = "idle";
+      status = "idle";
     }
 
     // Runtime
@@ -356,43 +419,71 @@ export function cmdList(config: Config): void {
       else runtime = `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`;
     }
 
-    // Last meaningful activity — try log file first (headless), fall back to tmux
+    // PR link
+    let pr = "";
+    const prInfo = execQuiet(
+      `gh pr list --head "${name}" --state all --json number,state --jq '.[0] | "#\\(.number) \\(.state)"'`,
+    );
+    if (prInfo && prInfo.startsWith("#") && !prInfo.includes("null")) pr = prInfo;
+
+    // Last meaningful activity (skip in brief mode)
     let lastLine = "";
-    const logFile = join(path, ".dispatch.log");
-    if (existsSync(logFile)) {
-      // stream-json: each line is a JSON object, find last assistant text
-      const tail = execQuiet(`tail -20 '${logFile}'`);
-      if (tail) {
-        const jsonLines = tail.split("\n").reverse();
-        for (const jl of jsonLines) {
-          try {
-            const obj = JSON.parse(jl);
-            if (obj.type === "assistant" && obj.message?.content) {
-              const textBlock = obj.message.content.find((b: any) => b.type === "text");
-              if (textBlock?.text) {
-                const lines = textBlock.text.split("\n").filter((l: string) => l.trim());
-                lastLine = lines[lines.length - 1]?.trim() || "";
-                break;
+    if (!brief) {
+      const logFile = join(path, ".dispatch.log");
+      if (existsSync(logFile)) {
+        const tail = execQuiet(`tail -20 '${logFile}'`);
+        if (tail) {
+          const jsonLines = tail.split("\n").reverse();
+          for (const jl of jsonLines) {
+            try {
+              const obj = JSON.parse(jl);
+              if (obj.type === "assistant" && obj.message?.content) {
+                const textBlock = obj.message.content.find((b: any) => b.type === "text");
+                if (textBlock?.text) {
+                  const ll = textBlock.text.split("\n").filter((l: string) => l.trim());
+                  lastLine = ll[ll.length - 1]?.trim() || "";
+                  break;
+                }
               }
-            }
-          } catch {}
+            } catch {}
+          }
         }
       }
-    }
-    if (!lastLine) {
-      const capture = tmuxCapture(name, 10);
-      if (capture) {
-        const capLines = capture.split("\n").filter((l) => l.trim());
-        lastLine = capLines[capLines.length - 1]?.trim() || "";
+      if (!lastLine) {
+        const capture = tmuxCapture(name, 10);
+        if (capture) {
+          const capLines = capture.split("\n").filter((l) => l.trim());
+          lastLine = capLines[capLines.length - 1]?.trim() || "";
+        }
       }
+      if (lastLine.length > 80) lastLine = lastLine.slice(0, 77) + "...";
     }
-    if (lastLine.length > 80) lastLine = lastLine.slice(0, 77) + "...";
 
+    agents.push({ name, status, statusIcon, runtime, lastLine, pr });
+  }
+
+  if (brief) {
+    // Compact format: one line per agent, for MCP consumption
+    for (const a of agents) {
+      const prTag = a.pr ? `  ${a.pr}` : "";
+      console.log(`${a.statusIcon} ${a.name}  (${a.status})${a.runtime ? `  ${a.runtime}` : ""}${prTag}`);
+    }
+    return;
+  }
+
+  console.log();
+  console.log(`${fmt.BOLD}Running Agents${fmt.NC}`);
+  console.log(
+    `${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`,
+  );
+
+  for (const a of agents) {
+    const prTag = a.pr ? `  ${fmt.BLUE}${a.pr}${fmt.NC}` : "";
     console.log(
-      `  ${statusIcon} ${fmt.BOLD}${name}${fmt.NC}  ${fmt.DIM}(${statusText})${fmt.NC}${runtime ? `  ${fmt.DIM}${runtime}${fmt.NC}` : ""}`,
+      `  ${a.statusIcon} ${fmt.BOLD}${a.name}${fmt.NC}  ${fmt.DIM}(${a.status})${fmt.NC}${a.runtime ? `  ${fmt.DIM}${a.runtime}${fmt.NC}` : ""}${prTag}`,
     );
-    if (lastLine) {
-      console.log(`    ${fmt.DIM}⤷ ${lastLine}${fmt.NC}`);
+    if (a.lastLine) {
+      console.log(`    ${fmt.DIM}⤷ ${a.lastLine}${fmt.NC}`);
     }
   }
 
@@ -427,23 +518,32 @@ export function cmdLogs(args: string[], config: Config): void {
   }
 }
 
-export function cmdStop(args: string[]): void {
+export function cmdStop(args: string[], config?: Config): void {
   const id = args[0];
   if (!id) {
     log.error("Usage: dispatch stop <agent-id>");
     process.exit(1);
   }
 
-  if (!sessionExists(id)) {
-    log.warn(`Agent '${id}' is not running`);
+  if (sessionExists(id)) {
+    log.info(`Stopping agent: ${id}`);
+    tmuxSendKeys(id, "C-c");
+    spawnSync("sleep", ["1"]);
+    tmuxKillWindow(id);
+    log.ok(`Agent stopped: ${id}`);
     return;
   }
 
-  log.info(`Stopping agent: ${id}`);
-  tmuxSendKeys(id, "C-c");
-  spawnSync("sleep", ["1"]);
-  tmuxKillWindow(id);
-  log.ok(`Agent stopped: ${id}`);
+  // Fallback: try closing cmux workspace via marker file (works from outside cmux)
+  const root = execQuiet("git rev-parse --show-toplevel") || "";
+  const wtDir = config?.worktreeDir || ".worktrees";
+  const wtPath = root ? join(root, wtDir, id) : "";
+  if (wtPath && tryCmuxCloseFromMarker(wtPath)) {
+    log.ok(`Closed cmux workspace: ${id}`);
+    return;
+  }
+
+  log.warn(`Agent '${id}' is not running`);
 }
 
 export function cmdResume(args: string[], config: Config): void {
@@ -456,7 +556,7 @@ export function cmdResume(args: string[], config: Config): void {
   const headless = args.includes("--headless") || args.includes("-H");
   const noAttach = args.includes("--no-attach");
 
-  ensureTmux();
+  ensureMultiplexer();
 
   const wtPath = worktreePath(id, config);
   if (!existsSync(wtPath)) {
@@ -472,7 +572,22 @@ export function cmdResume(args: string[], config: Config): void {
 
   createSession(id, wtPath);
 
-  if (!headless) {
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(id) || loadCmuxWorkspaceId(wtPath);
+    cmuxUpdateState(id, wtPath, "running", `Resuming agent (${headless ? "headless" : "interactive"})`);
+    if (!headless) {
+      const modelFlag = config.model ? `--model ${config.model}` : "";
+      cmuxSend(wsId!, `unset CLAUDECODE && claude --continue ${modelFlag}`);
+      log.ok(`Resumed agent: ${id} (interactive)`);
+      if (!noAttach) tmuxAttach(id);
+    } else {
+      const resumePrompt = "Continue working on the task.";
+      const claudeCmd = buildClaudeCmd(resumePrompt, "headless", wtPath, config, "--continue");
+      const logFile = join(wtPath, ".dispatch.log");
+      cmuxSend(wsId!, `unset CLAUDECODE && ${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}`);
+      log.ok(`Resumed agent: ${id} (headless)`);
+    }
+  } else if (!headless) {
     const modelFlag = config.model ? `--model ${config.model}` : "";
     execSync(
       `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude --continue ${modelFlag}" Enter`,
@@ -537,7 +652,10 @@ export function cmdCleanup(args: string[], config: Config): void {
 
     for (const name of entries) {
       if (sessionExists(name)) {
-        cmdStop([name]);
+        cmdStop([name], config);
+      } else {
+        // Try closing cmux workspace even if sessionExists fails (e.g., outside cmux)
+        tryCmuxCloseFromMarker(join(wtDir, name));
       }
       removeWorktree(name, config);
       if (deleteBranch) {
@@ -551,7 +669,9 @@ export function cmdCleanup(args: string[], config: Config): void {
     }
   } else if (id) {
     if (sessionExists(id)) {
-      cmdStop([id]);
+      cmdStop([id], config);
+    } else {
+      tryCmuxCloseFromMarker(worktreePath(id, config));
     }
     removeWorktree(id, config);
     if (deleteBranch) {
@@ -568,8 +688,221 @@ export function cmdCleanup(args: string[], config: Config): void {
   }
 }
 
+/** Check if a branch was merged — tries git branch --merged, then gh pr status. */
+function isBranchMerged(branch: string, baseBranch: string): boolean {
+  // 1. Check if branch is merged into base via git
+  const r = spawnSync(
+    "git", ["branch", "--merged", `origin/${baseBranch}`],
+    { stdio: "pipe" },
+  );
+  const mergedBranches = r.stdout?.toString() || "";
+  if (mergedBranches.split("\n").some((b) => b.trim() === branch)) {
+    return true;
+  }
+
+  // 2. Check GitHub PR status via gh CLI
+  const pr = execQuiet(
+    `gh pr list --head "${branch}" --state merged --json number --jq '.[0].number'`,
+  );
+  if (pr && /^\d+$/.test(pr)) return true;
+
+  return false;
+}
+
+export function cmdPrune(args: string[], config: Config): void {
+  const dryRun = args.includes("--dry-run");
+  const deleteBranch = args.includes("--delete-branch");
+  const mergedOnly = args.includes("--merged");
+  const includeIdle = args.includes("--idle");
+
+  const root = gitRoot();
+  const wtDir = join(root, config.worktreeDir);
+
+  if (!existsSync(wtDir)) {
+    log.info("No worktrees to prune");
+    return;
+  }
+
+  let entries: string[];
+  try {
+    entries = readdirSync(wtDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch {
+    log.info("No worktrees to prune");
+    return;
+  }
+
+  // Find stale worktrees
+  const stale: { name: string; reason: string; merged: boolean }[] = [];
+  if (mergedOnly) log.info(`Checking ${entries.length} worktrees for merged PRs...`);
+  for (const name of entries) {
+    const hasSession = sessionExists(name);
+
+    // --merged: check all worktrees regardless of session state
+    if (mergedOnly) {
+      const merged = isBranchMerged(name, config.baseBranch);
+      if (!merged) continue;
+      const reason = !hasSession ? "merged, no session" : "merged";
+      stale.push({ name, reason, merged: true });
+      continue;
+    }
+
+    if (!hasSession) {
+      // No session at all — clearly stale
+    } else if (includeIdle) {
+      // Check if the agent is actually idle (Claude exited, sitting at shell prompt)
+      const capture = tmuxCapture(name, 5);
+      const lines = capture.split("\n").filter((l) => l.trim());
+      const lastLine = lines[lines.length - 1]?.trim() || "";
+      const isIdle = /[$%#]\s*$/.test(lastLine) && !/claude/i.test(lastLine);
+      if (!isIdle) continue;
+    } else {
+      continue; // session exists and we're not checking idle
+    }
+
+    let merged = false;
+    if (deleteBranch) {
+      merged = isBranchMerged(name, config.baseBranch);
+    }
+
+    const reason = !hasSession ? "no session" : "idle";
+    stale.push({ name, reason, merged });
+  }
+
+  if (stale.length === 0) {
+    log.ok("No stale worktrees found");
+    return;
+  }
+
+  console.log();
+  console.log(`${fmt.BOLD}Stale worktrees${fmt.NC}`);
+  console.log(
+    `${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`,
+  );
+  for (const { name, reason, merged } of stale) {
+    const mergedTag = merged && !reason.includes("merged") ? `  ${fmt.GREEN}(merged)${fmt.NC}` : "";
+    const reasonTag = `${fmt.DIM}(${reason})${fmt.NC}`;
+    console.log(`  ${fmt.RED}●${fmt.NC} ${name}  ${reasonTag}${mergedTag}`);
+  }
+  console.log();
+
+  if (dryRun) {
+    log.info(`${stale.length} stale worktree(s) would be pruned. Run without --dry-run to remove.`);
+    return;
+  }
+
+  for (const { name } of stale) {
+    if (sessionExists(name)) {
+      cmdStop([name], config);
+    } else {
+      tryCmuxCloseFromMarker(worktreePath(name, config));
+    }
+    removeWorktree(name, config);
+    if (deleteBranch) {
+      const r = spawnSync("git", ["branch", "-D", name], { stdio: "pipe" });
+      if (r.status === 0) {
+        log.ok(`Deleted branch: ${name}`);
+      }
+    }
+  }
+
+  execQuiet("git worktree prune");
+  console.log();
+  log.ok(`Pruned ${stale.length} stale worktree(s)`);
+}
+
+export function cmdDashboard(config: Config): void {
+  if (!useCmux()) {
+    log.error("Dashboard requires cmux");
+    return;
+  }
+
+  const root = gitRoot();
+  const dashPath = join(root, ".dispatch-dashboard.md");
+
+  // Write initial dashboard
+  writeDashboardFile(dashPath, config);
+
+  // Open markdown panel in cmux (it auto-reloads on file change)
+  const wsId = process.env.CMUX_WORKSPACE_ID;
+  if (wsId) {
+    cmuxOpenMarkdown(wsId, dashPath);
+    log.ok("Dashboard opened — auto-refreshes on changes");
+  } else {
+    log.warn(`Markdown file written to ${dashPath}. Open with: cmux markdown open ${dashPath}`);
+  }
+
+  // Refresh loop — update every 10 seconds
+  const refresh = () => writeDashboardFile(dashPath, config);
+  setInterval(refresh, 10_000);
+  log.dim("Refreshing every 10s. Ctrl-C to stop.");
+
+  // Keep alive
+  process.on("SIGINT", () => {
+    // Clean up dashboard file
+    try { require("fs").unlinkSync(dashPath); } catch {}
+    process.exit(0);
+  });
+}
+
+function writeDashboardFile(dashPath: string, config: Config): void {
+  const lines = tmuxListWindows();
+  if (!lines) {
+    writeFileSync(dashPath, "# Dispatch Dashboard\n\nNo agents running.\n");
+    return;
+  }
+
+  const rows: string[] = [];
+  for (const line of lines.split("\n")) {
+    if (!line) continue;
+    const [name, pid, path, dead, created] = line.split("|");
+    if (name === "dispatch") continue;
+
+    let status: string;
+    if (dead === "1") {
+      status = "🔴 exited";
+    } else if (pid && execQuiet(`pgrep -P ${pid}`) !== null) {
+      status = "🟢 running";
+    } else {
+      status = "🟡 idle";
+    }
+
+    let runtime = "";
+    if (created) {
+      const secs = Math.floor(Date.now() / 1000) - parseInt(created, 10);
+      if (secs < 60) runtime = `${secs}s`;
+      else if (secs < 3600) runtime = `${Math.floor(secs / 60)}m`;
+      else runtime = `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`;
+    }
+
+    let pr = "";
+    const prInfo = execQuiet(
+      `gh pr list --head "${name}" --state all --json number,state --jq '.[0] | "#\\(.number) \\(.state)"'`,
+    );
+    if (prInfo && prInfo.startsWith("#") && !prInfo.includes("null")) pr = prInfo;
+
+    rows.push(`| ${name} | ${status} | ${runtime} | ${pr} |`);
+  }
+
+  const now = new Date().toLocaleTimeString();
+  const md = `# Dispatch Dashboard
+
+_Updated: ${now}_
+
+| Agent | Status | Runtime | PR |
+|-------|--------|---------|-----|
+${rows.join("\n")}
+
+---
+_${rows.length} agent(s) total_
+`;
+
+  writeFileSync(dashPath, md);
+}
+
 export function cmdAttach(args: string[]): void {
-  ensureTmux();
+  ensureMultiplexer();
   if (!tmuxHasSession()) {
     log.error("No dispatch session running");
     process.exit(1);
@@ -578,10 +911,44 @@ export function cmdAttach(args: string[]): void {
   tmuxAttach(window);
 }
 
-export function cmdNotifyDone(args: string[]): void {
+export function cmdNotifyDone(args: string[], config: Config): void {
   const agentId = args[0] || "unknown";
-  notify("Dispatch", `Agent ${agentId} finished`);
+  const wtPath = worktreePath(agentId, config);
+
+  notify("Dispatch", `Agent ${agentId} finished`, agentId);
   log.ok(`Agent ${agentId} completed`);
+
+  // Check for a PR on this branch
+  const prUrl = execQuiet(
+    `gh pr list --head "${agentId}" --state open --json url --jq '.[0].url'`,
+  );
+
+  if (useCmux()) {
+    if (prUrl && prUrl.startsWith("http")) {
+      // Open PR in browser split + update state
+      const wsId = getCmuxWorkspaceId(agentId);
+      if (wsId) {
+        cmuxOpenBrowser(wsId, prUrl);
+        cmuxLog(wsId, `PR opened: ${prUrl}`);
+      }
+      cmuxUpdateState(agentId, wtPath, "done", `PR created: ${prUrl}`);
+      log.ok(`Opened PR in browser: ${prUrl}`);
+    } else {
+      cmuxUpdateState(agentId, wtPath, "done", "Agent finished");
+    }
+  }
+
+  // Auto-prune if the branch was merged
+  if (isBranchMerged(agentId, config.baseBranch)) {
+    cmuxUpdateState(agentId, wtPath, "merged", "Branch merged — auto-pruning");
+    log.info(`Branch '${agentId}' was merged — auto-pruning worktree`);
+    if (sessionExists(agentId)) {
+      tmuxKillWindow(agentId);
+    }
+    removeWorktree(agentId, config);
+    spawnSync("git", ["branch", "-D", agentId], { stdio: "pipe" });
+    log.ok(`Auto-pruned: ${agentId}`);
+  }
 }
 
 const CLAUDE_MD_SNIPPET = `
