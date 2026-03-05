@@ -6,7 +6,7 @@ set +e
 DISPATCH="node $HOME/git/dispatch/dist/cli.js"
 AGENT_NAME="test-cmux-$(date +%s | tail -c 5)"
 
-echo "=== cmux integration test (v0.5.6) ==="
+echo "=== cmux integration test (v0.6.0) ==="
 echo ""
 
 # 1. Check env vars
@@ -27,71 +27,85 @@ echo ""
 
 # 3. Test sidebar features (on current workspace)
 echo "3. Testing sidebar status + log + color..."
-cmux set-status dispatch "testing" --color "#F18F01" --workspace "$CMUX_WORKSPACE_ID"
+cmux set-status dispatch "testing" --color "#F18F01" --icon "bolt.fill" --workspace "$CMUX_WORKSPACE_ID"
 cmux log --source dispatch --workspace "$CMUX_WORKSPACE_ID" -- "Test log entry from dispatch"
 echo "   Check sidebar for status and log entry"
-
-# Test workspace color — try different approaches
-echo "   Testing tab color..."
-cmux workspace-action --action set-color --workspace "$CMUX_WORKSPACE_ID" --title "#44BBA4" 2>&1 && echo "   workspace-action set-color: OK" || echo "   workspace-action set-color: FAILED"
-cmux workspace-action --action color --workspace "$CMUX_WORKSPACE_ID" --title "#44BBA4" 2>&1 && echo "   workspace-action color: OK" || echo "   workspace-action color: FAILED"
-cmux workspace-action --action set-tab-color --workspace "$CMUX_WORKSPACE_ID" --title "#44BBA4" 2>&1 && echo "   workspace-action set-tab-color: OK" || echo "   workspace-action set-tab-color: FAILED"
-# List available capabilities
-echo "   workspace/color/tab capabilities:"
-cmux capabilities 2>&1 | grep -iE "workspace|color|theme|tab" || echo "   (none found)"
-
 sleep 2
 cmux clear-status dispatch --workspace "$CMUX_WORKSPACE_ID"
+echo "   OK"
 echo ""
 
-# 4. Test dispatch detection
-echo "4. dispatch detection"
+# 4. Test new primitives: set-hook, trigger-flash, find-window, pipe-pane, set-progress
+echo "4. Testing new cmux primitives..."
+echo "   set-hook:"
+cmux set-hook --workspace "$CMUX_WORKSPACE_ID" test-hook "echo hook-fired" 2>&1 && echo "     OK" || echo "     FAILED"
+echo "   trigger-flash:"
+cmux trigger-flash --workspace "$CMUX_WORKSPACE_ID" 2>&1 && echo "     OK" || echo "     FAILED"
+echo "   set-progress:"
+cmux set-progress 0.5 --workspace "$CMUX_WORKSPACE_ID" --label "Test 50%" 2>&1 && echo "     OK" || echo "     FAILED"
+sleep 1
+cmux clear-progress --workspace "$CMUX_WORKSPACE_ID" 2>&1
+echo "   find-window:"
+cmux find-window --content "cmux integration test" 2>&1 && echo "     OK" || echo "     FAILED"
+echo ""
+
+# 5. Test dispatch detection
+echo "5. dispatch detection"
 $DISPATCH list --brief 2>&1 | head -5
 echo ""
 
-# 5. Test workspace creation + prompt delivery
-echo "5. Creating test workspace: $AGENT_NAME"
-$DISPATCH run "List the files in this directory, then say DONE." --name "$AGENT_NAME" --no-attach 2>&1
+# 6. Test dispatch find (search)
+echo "6. dispatch find"
+$DISPATCH find "integration test" 2>&1
 echo ""
 
-# 6. Wait for agent to initialize
-echo "6. Waiting for agent to start..."
+# 7. Test workspace creation + prompt delivery
+echo "7. Creating test workspace: $AGENT_NAME"
+$DISPATCH run "List the files in this directory, then say DONE." --name "$AGENT_NAME" --base main --no-attach 2>&1
+echo ""
+
+# 8. Wait for agent to initialize
+echo "8. Waiting for agent to start..."
 sleep 5
 
-# 7. Check dispatch list finds it
-echo "7. dispatch list"
+# 9. Check dispatch list finds it
+echo "9. dispatch list"
 $DISPATCH list --brief 2>&1
 echo ""
 
-# 8. Check the workspace has the marker file
+# 10. Check the workspace has the marker file
 ROOT=$(git rev-parse --show-toplevel)
 MARKER="$ROOT/.worktrees/$AGENT_NAME/.dispatch-cmux-workspace"
 if [ -f "$MARKER" ]; then
-  echo "8. Marker file: OK ($(cat $MARKER))"
+  echo "10. Marker file: OK ($(cat $MARKER))"
 else
-  echo "8. Marker file: MISSING at $MARKER"
+  echo "10. Marker file: MISSING at $MARKER"
 fi
 echo ""
 
-# 9. Test notification
-echo "9. Testing notification..."
+# 11. Test notification + flash
+echo "11. Testing notification + flash..."
 cmux notify --title "Dispatch Test" --body "Agent $AGENT_NAME test notification"
-echo "   Check for notification"
+# Flash the agent's workspace
+AGENT_WS=$(cat "$MARKER" 2>/dev/null)
+if [ -n "$AGENT_WS" ]; then
+  cmux trigger-flash --workspace "$AGENT_WS" 2>&1 && echo "   flash on agent tab: OK" || echo "   flash on agent tab: FAILED"
+fi
 echo ""
 
-# 10. Test stop (should close cmux tab)
-echo "10. Stopping agent..."
+# 12. Test stop (should close cmux tab)
+echo "12. Stopping agent..."
 $DISPATCH stop "$AGENT_NAME" 2>&1
 echo ""
 
-# 11. Verify tab closed
-echo "11. Checking if tab closed..."
+# 13. Verify tab closed
+echo "13. Checking if tab closed..."
 sleep 1
 $DISPATCH list --brief 2>&1 || echo "   (no agents — expected)"
 echo ""
 
-# 12. Cleanup
-echo "12. Cleaning up..."
+# 14. Cleanup
+echo "14. Cleaning up..."
 $DISPATCH cleanup "$AGENT_NAME" --delete-branch 2>&1
 echo ""
 
@@ -99,6 +113,9 @@ echo "=== Test complete ==="
 echo ""
 echo "Manual checks:"
 echo "  - Did the agent tab appear in cmux sidebar?"
-echo "  - Was the tab colored (green for running)?"
+echo "  - Was the sidebar status colored (green for running)?"
 echo "  - Did the prompt get delivered (agent started working)?"
 echo "  - Did 'dispatch stop' close the tab?"
+echo "  - Did trigger-flash light up the tab? (step 4 + 11)"
+echo "  - Did set-progress show a progress bar? (step 4)"
+echo "  - Did find-window return results? (step 4 + 6)"

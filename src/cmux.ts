@@ -291,6 +291,58 @@ export function cmuxSetWorkspaceColor(workspaceId: string, state: AgentState): b
 }
 
 // ---------------------------------------------------------------------------
+// Hooks
+// ---------------------------------------------------------------------------
+
+/** Set a hook on a workspace (e.g., "pane-exited", "window-closed"). */
+export function cmuxSetHook(
+  workspaceId: string,
+  hook: string,
+  command: string,
+): boolean {
+  const r = cmux(["set-hook", "--workspace", workspaceId, hook, command]);
+  return r.ok;
+}
+
+// ---------------------------------------------------------------------------
+// Flash
+// ---------------------------------------------------------------------------
+
+/** Trigger a visual flash on a workspace tab (attention indicator). */
+export function cmuxTriggerFlash(workspaceId: string): boolean {
+  const r = cmux(["trigger-flash", "--workspace", workspaceId]);
+  return r.ok;
+}
+
+// ---------------------------------------------------------------------------
+// Find
+// ---------------------------------------------------------------------------
+
+/** Search across workspace terminal content. Returns matching workspace refs. */
+export function cmuxFindWindow(
+  query: string,
+  opts?: { select?: boolean },
+): string {
+  const args = ["find-window", "--content", query];
+  if (opts?.select) args.push("--select");
+  const r = cmux(args);
+  return r.stdout;
+}
+
+// ---------------------------------------------------------------------------
+// Pipe pane
+// ---------------------------------------------------------------------------
+
+/** Pipe workspace terminal output to a command. */
+export function cmuxPipePane(
+  workspaceId: string,
+  command: string,
+): boolean {
+  const r = cmux(["pipe-pane", "--workspace", workspaceId, "--", command]);
+  return r.ok;
+}
+
+// ---------------------------------------------------------------------------
 // Sidebar log
 // ---------------------------------------------------------------------------
 

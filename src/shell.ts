@@ -19,6 +19,10 @@ import {
   cmuxClearStatus,
   cmuxSetProgress,
   cmuxClearProgress,
+  cmuxSetHook,
+  cmuxTriggerFlash,
+  cmuxFindWindow,
+  cmuxPipePane,
   saveCmuxWorkspaceId,
   loadCmuxWorkspaceId,
 } from "./cmux.js";
@@ -239,6 +243,8 @@ export function createSession(id: string, cwd: string): boolean {
     cmuxSend(workspaceId, `cd '${cwd}'`);
     saveCmuxWorkspaceId(cwd, workspaceId);
     cmuxSetStatus(workspaceId, "dispatch", "starting", { color: "#2E86AB" });
+    // Auto-prune hook: when the workspace closes, notify dispatch
+    cmuxSetHook(workspaceId, "pane-exited", `dispatch _notify-done ${id}`);
     return true;
   }
 

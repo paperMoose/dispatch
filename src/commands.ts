@@ -38,10 +38,13 @@ import {
   cmuxClearStatus,
   cmuxSetProgress,
   cmuxClearProgress,
+  cmuxPipePane,
   cmuxOpenBrowser,
   cmuxSetWorkspaceColor,
   cmuxLog,
   cmuxOpenMarkdown,
+  cmuxTriggerFlash,
+  cmuxFindWindow,
   loadCmuxWorkspaceId,
   tryCmuxCloseFromMarker,
 } from "./cmux.js";
@@ -213,6 +216,11 @@ async function launchAgent(
       const logFile = join(wtPath, ".dispatch.log");
       cmuxUpdateState(id, wtPath, "running", "Headless agent started");
       cmuxSend(wsId!, `unset CLAUDECODE && ${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}`);
+      // Set up progress tracking via pipe-pane for headless agents with max-turns
+      if (config.maxTurns) {
+        const progressScript = `dispatch _track-progress ${id} ${config.maxTurns}`;
+        cmuxPipePane(wsId!, progressScript);
+      }
     }
   } else if (mode === "interactive") {
     // Launch claude, wait for it to be ready, then send prompt via paste-buffer
@@ -920,9 +928,19 @@ export function cmdNotifyDone(args: string[], config: Config): void {
   );
 
   if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(agentId) || loadCmuxWorkspaceId(wtPath);
+
+    // Flash the tab to get attention
+    if (wsId) cmuxTriggerFlash(wsId);
+
+    // Extract investigation summary from log file and post to sidebar
+    if (wsId) extractSummaryToSidebar(wsId, wtPath);
+
+    // Clear any progress bar
+    if (wsId) cmuxClearProgress(wsId);
+
     if (prUrl && prUrl.startsWith("http")) {
       // Open PR in browser split + update state
-      const wsId = getCmuxWorkspaceId(agentId);
       if (wsId) {
         cmuxOpenBrowser(wsId, prUrl);
         cmuxLog(wsId, `PR opened: ${prUrl}`);
@@ -945,6 +963,121 @@ export function cmdNotifyDone(args: string[], config: Config): void {
     spawnSync("git", ["branch", "-D", agentId], { stdio: "pipe" });
     log.ok(`Auto-pruned: ${agentId}`);
   }
+}
+
+/** Extract summary from agent log and post key findings to cmux sidebar. */
+function extractSummaryToSidebar(wsId: string, wtPath: string): void {
+  const logFile = join(wtPath, ".dispatch.log");
+  if (!existsSync(logFile)) return;
+
+  try {
+    const content = readFileSync(logFile, "utf-8");
+    const lines = content.split("\n").filter(l => l.trim());
+
+    // Parse JSON stream output, collect assistant text blocks
+    const findings: string[] = [];
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj.type === "assistant" && obj.message?.content) {
+          for (const block of obj.message.content) {
+            if (block.type === "text" && block.text) {
+              // Extract the last non-empty line as a finding
+              const textLines = block.text.split("\n").filter((l: string) => l.trim());
+              const last = textLines[textLines.length - 1]?.trim();
+              if (last && last.length > 10 && last.length < 200) {
+                findings.push(last);
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // Post the last few findings to sidebar
+    const summary = findings.slice(-5);
+    for (const finding of summary) {
+      cmuxLog(wsId, finding);
+    }
+
+    // Count turns for summary
+    const turnCount = lines.filter(l => {
+      try { return JSON.parse(l).type === "assistant"; } catch { return false; }
+    }).length;
+    if (turnCount > 0) {
+      cmuxLog(wsId, `Completed in ${turnCount} turns`);
+    }
+  } catch {}
+}
+
+export function cmdFind(args: string[]): void {
+  const query = args.join(" ");
+  if (!query) {
+    log.error("Usage: dispatch find <search-term>");
+    process.exit(1);
+  }
+
+  if (!useCmux()) {
+    // Fallback: grep through log files
+    const root = execQuiet("git rev-parse --show-toplevel") || "";
+    if (!root) { log.error("Not in a git repo"); return; }
+    const wtDir = join(root, ".worktrees");
+    if (!existsSync(wtDir)) { log.info("No worktrees to search"); return; }
+
+    let entries: string[];
+    try {
+      entries = readdirSync(wtDir, { withFileTypes: true })
+        .filter(d => d.isDirectory()).map(d => d.name);
+    } catch { return; }
+
+    let found = false;
+    for (const name of entries) {
+      const logFile = join(wtDir, name, ".dispatch.log");
+      if (!existsSync(logFile)) continue;
+      const content = readFileSync(logFile, "utf-8");
+      if (content.includes(query)) {
+        log.ok(`Found in agent: ${name}`);
+        found = true;
+      }
+    }
+    if (!found) log.info("No matches found");
+    return;
+  }
+
+  // cmux: search across all workspace terminal content
+  const result = cmuxFindWindow(query, { select: true });
+  if (result) {
+    console.log(result);
+  } else {
+    log.info("No matches found across agent workspaces");
+  }
+}
+
+export function cmdTrackProgress(args: string[]): void {
+  const agentId = args[0];
+  const maxTurns = parseInt(args[1] || "0", 10);
+  if (!agentId || !maxTurns) return;
+
+  const wsId = getCmuxWorkspaceId(agentId);
+  if (!wsId) return;
+
+  // Read stdin line by line, count assistant turns, update progress
+  let turnCount = 0;
+  process.stdin.setEncoding("utf-8");
+  process.stdin.on("data", (chunk: string) => {
+    const lines = chunk.split("\n");
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj.type === "assistant") {
+          turnCount++;
+          const progress = Math.min(turnCount / maxTurns, 1);
+          cmuxSetProgress(wsId, progress, `Turn ${turnCount}/${maxTurns}`);
+        }
+      } catch {}
+    }
+  });
 }
 
 const CLAUDE_MD_SNIPPET = `
