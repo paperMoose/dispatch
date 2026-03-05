@@ -35,6 +35,7 @@ import {
   cmuxSendKey,
   cmuxPasteBuffer,
   cmuxSetStatus,
+  cmuxClearStatus,
   cmuxSetProgress,
   cmuxClearProgress,
   cmuxOpenBrowser,
@@ -205,7 +206,9 @@ async function launchAgent(
       cmuxSend(wsId!, prompt);
       spawnSync("sleep", ["1"]);
       cmuxSendKey(wsId!, "enter");
-      cmuxUpdateState(id, wtPath, "running", "Prompt sent — agent working");
+      // Clear dispatch status so cmux's native claude-hook takes over state tracking
+      cmuxLog(wsId!, "Prompt sent — agent working");
+      cmuxClearStatus(wsId!, "dispatch");
     } else {
       const logFile = join(wtPath, ".dispatch.log");
       cmuxUpdateState(id, wtPath, "running", "Headless agent started");
