@@ -13,7 +13,7 @@ import {
   cmdSetup,
 } from "./commands.js";
 
-const VERSION = "0.5.8";
+const VERSION = "0.5.9";
 
 function help(): void {
   console.log(`dispatch — Launch Claude Code agents in isolated git worktrees
