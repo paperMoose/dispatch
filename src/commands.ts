@@ -201,8 +201,10 @@ async function launchAgent(
       // Save prompt to file for reference
       const pf = join(wtPath, ".dispatch-prompt.txt");
       writeFileSync(pf, prompt);
-      // Send prompt via cmux send (types text + Enter)
+      // Send prompt text, then explicit Enter keypress to submit
       cmuxSend(wsId!, prompt);
+      spawnSync("sleep", ["1"]);
+      cmuxSendKey(wsId!, "enter");
       cmuxUpdateState(id, wtPath, "running", "Prompt sent — agent working");
     } else {
       const logFile = join(wtPath, ".dispatch.log");
