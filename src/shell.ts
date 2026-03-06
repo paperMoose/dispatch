@@ -395,13 +395,18 @@ function cmuxListDispatchWorkspaces(): string {
   return results.join("\n");
 }
 
-export function tmuxAttach(window?: string): void {
+export function tmuxAttach(window?: string, explicit = true): void {
   if (!window) {
     log.error("Agent ID required for attach");
     return;
   }
 
   if (useCmux()) {
+    if (!explicit) {
+      // Skip auto-focus in cmux — agent already has its own workspace
+      log.ok(`Agent running in cmux workspace: ${window}`);
+      return;
+    }
     const wsId = getCmuxWorkspaceId(window);
     if (wsId) {
       cmuxSelectWorkspace(wsId);

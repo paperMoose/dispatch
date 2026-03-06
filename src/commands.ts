@@ -368,7 +368,7 @@ export async function cmdRun(
     log.info("Attaching to tmux session...");
     log.dim("  Detach with: Ctrl-B then D");
     console.log();
-    tmuxAttach(launchedIds[0]);
+    tmuxAttach(launchedIds[0], false);
   } else if (inputs.length > 1) {
     log.ok(`All agents launched. Use ${fmt.BOLD}dispatch attach${fmt.NC} to view tabs.`);
   }
@@ -583,7 +583,7 @@ export function cmdResume(args: string[], config: Config): void {
       const modelFlag = config.model ? `--model ${config.model}` : "";
       cmuxSend(wsId!, `unset CLAUDECODE && claude --continue ${modelFlag}`);
       log.ok(`Resumed agent: ${id} (interactive)`);
-      if (!noAttach) tmuxAttach(id);
+      if (!noAttach) tmuxAttach(id, false);
     } else {
       const resumePrompt = "Continue working on the task.";
       const claudeCmd = buildClaudeCmd(resumePrompt, "headless", wtPath, config, "--continue");
@@ -597,7 +597,7 @@ export function cmdResume(args: string[], config: Config): void {
       `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude --continue ${modelFlag}" Enter`,
     );
     log.ok(`Resumed agent: ${id} (interactive)`);
-    if (!noAttach) tmuxAttach(id);
+    if (!noAttach) tmuxAttach(id, false);
   } else {
     const resumePrompt = "Continue working on the task.";
     const claudeCmd = buildClaudeCmd(
