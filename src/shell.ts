@@ -255,9 +255,9 @@ function cmuxWorkspaceExists(id: string): boolean {
       return workspaces.some(w => w.ref === wsId);
     }
   }
-  // Fallback: fuzzy title match (cmux truncates long titles)
+  // Fallback: exact title match only
   const workspaces = parseCmuxWorkspaces();
-  return workspaces.some(w => w.title === id || w.title.startsWith(id.slice(0, 15)));
+  return workspaces.some(w => w.title === id);
 }
 
 /** Create a multiplexer session for an agent.
@@ -629,10 +629,9 @@ function getCmuxWorkspaceId(id: string): string | null {
     const wsId = loadCmuxWorkspaceId(wtPath);
     if (wsId) return wsId;
   }
-  // Fallback: search by workspace title (exact or prefix match, since cmux truncates)
+  // Fallback: exact title match only
   const workspaces = parseCmuxWorkspaces();
-  const ws = workspaces.find(w => w.title === id) ||
-    workspaces.find(w => id.startsWith(w.title) || w.title.startsWith(id.slice(0, 15)));
+  const ws = workspaces.find(w => w.title === id);
   return ws?.ref || null;
 }
 
