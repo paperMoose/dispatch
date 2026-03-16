@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "node --import tsx --test tests/*.test.ts",
+    "bump": "./scripts/bump.sh"
   },
   "files": [
     "dist"
