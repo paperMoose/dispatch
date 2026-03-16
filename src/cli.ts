@@ -16,7 +16,7 @@ import {
   cmdSetup,
 } from "./commands.js";
 
-const VERSION = "0.6.0";
+const VERSION = "0.6.2";
 
 function help(): void {
   console.log(`dispatch — Launch Claude Code agents in isolated git worktrees
