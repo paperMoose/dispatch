@@ -89,6 +89,40 @@ export function execQuiet(cmd: string): string | null {
 // Git helpers
 // ---------------------------------------------------------------------------
 export function gitRoot(): string {
+  // Resolve the main repo root, even when running inside a worktree.
+  // --show-toplevel returns the worktree root, which causes nested worktrees.
+  // --git-common-dir returns the shared .git dir across all worktrees.
+  const commonDir = execQuiet("git rev-parse --git-common-dir");
+  if (!commonDir) {
+    log.error("Not inside a git repository");
+    process.exit(1);
+  }
+
+  // In main repo: commonDir is ".git" (relative)
+  // In a worktree: commonDir is absolute, e.g. "/path/to/repo/.git"
+  if (commonDir === ".git") {
+    // We're in the main repo — --show-toplevel is correct
+    const root = execQuiet("git rev-parse --show-toplevel");
+    if (!root) {
+      log.error("Not inside a git repository");
+      process.exit(1);
+    }
+    return root;
+  }
+
+  // We're in a worktree — strip trailing "/.git" to get the main repo root
+  if (commonDir.endsWith("/.git")) {
+    return commonDir.slice(0, -5);
+  }
+
+  // Edge case: commonDir might be something like "/repo/.git/worktrees/foo"
+  // (older git versions). Walk up to find the .git parent.
+  const gitIdx = commonDir.indexOf("/.git");
+  if (gitIdx !== -1) {
+    return commonDir.slice(0, gitIdx);
+  }
+
+  // Fallback
   const root = execQuiet("git rev-parse --show-toplevel");
   if (!root) {
     log.error("Not inside a git repository");
@@ -211,7 +245,7 @@ export function sessionExists(id: string): boolean {
 
 function cmuxWorkspaceExists(id: string): boolean {
   // Primary: check marker file in worktree
-  const root = execQuiet("git rev-parse --show-toplevel") || "";
+  const root = execQuiet("git rev-parse --git-common-dir") ? gitRoot() : "";
   if (root) {
     const wtPath = join(root, ".worktrees", id);
     const wsId = existsSync(wtPath) ? loadCmuxWorkspaceId(wtPath) : null;
@@ -226,10 +260,12 @@ function cmuxWorkspaceExists(id: string): boolean {
   return workspaces.some(w => w.title === id || w.title.startsWith(id.slice(0, 15)));
 }
 
-export function createSession(id: string, cwd: string): boolean {
+/** Create a multiplexer session for an agent.
+ *  Returns the cmux workspace ID (or "tmux" for tmux sessions), or null if already exists. */
+export function createSession(id: string, cwd: string): string | null {
   if (sessionExists(id)) {
     log.warn(`Session '${id}' already exists`);
-    return false;
+    return null;
   }
 
   if (useCmux()) {
@@ -243,11 +279,9 @@ export function createSession(id: string, cwd: string): boolean {
     cmuxSend(workspaceId, `cd '${cwd}'`);
     saveCmuxWorkspaceId(cwd, workspaceId);
     cmuxSetStatus(workspaceId, "dispatch", "starting", { color: "#2E86AB" });
-    // Auto-prune hook: when the workspace closes, notify dispatch
-    // Note: cmux sandbox may block /bin/sh — this hook is best-effort.
-    // The _notify-done command also runs at end of headless agents via the command chain.
-    cmuxSetHook(workspaceId, "pane-exited", `dispatch _notify-done ${id}`);
-    return true;
+    // Auto-cleanup hook: remove worktree on close, only delete branch if merged
+    cmuxSetHook(workspaceId, "pane-exited", `dispatch _auto-cleanup ${id}`);
+    return workspaceId;
   }
 
   const session = sessionName(id);
@@ -270,10 +304,10 @@ export function createSession(id: string, cwd: string): boolean {
   execQuiet(`tmux setw -t "${session}" allow-passthrough on`);
   execQuiet(`tmux setw -t "${session}" automatic-rename off`);
 
-  // Auto-prune hook: when the session is destroyed, check if branch was merged
-  execQuiet(`tmux set-hook -t "${session}" session-closed "run-shell 'dispatch _notify-done ${id}'"`);
+  // Auto-cleanup hook: remove worktree on close, only delete branch if merged
+  execQuiet(`tmux set-hook -t "${session}" session-closed "run-shell 'dispatch _auto-cleanup ${id}'"`);
 
-  return true;
+  return "tmux";
 }
 
 function sessionName(id: string): string {
@@ -366,7 +400,7 @@ export function tmuxHasSession(): boolean {
  *  We scan worktree directories for the .dispatch-cmux-workspace marker file,
  *  then verify the workspace still exists in cmux. */
 function cmuxListDispatchWorkspaces(): string {
-  const root = execQuiet("git rev-parse --show-toplevel") || "";
+  const root = execQuiet("git rev-parse --git-common-dir") ? gitRoot() : "";
   if (!root) return "";
 
   const wtDir = join(root, ".worktrees");
@@ -588,8 +622,8 @@ export function notify(title: string, message: string, agentId?: string): void {
 /** Resolve agent ID to a cmux workspace ID by checking worktree marker files. */
 function getCmuxWorkspaceId(id: string): string | null {
   // Primary: check marker file in worktree
-  const cwd = process.env.DISPATCH_CWD || process.cwd();
-  const root = execQuiet("git rev-parse --show-toplevel") || cwd;
+  const inRepo = execQuiet("git rev-parse --git-common-dir");
+  const root = inRepo ? gitRoot() : (process.env.DISPATCH_CWD || "");
   const wtPath = join(root, ".worktrees", id);
   if (existsSync(wtPath)) {
     const wsId = loadCmuxWorkspaceId(wtPath);

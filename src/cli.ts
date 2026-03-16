@@ -10,6 +10,7 @@ import {
   cmdDashboard,
   cmdAttach,
   cmdNotifyDone,
+  cmdAutoCleanup,
   cmdFind,
   cmdTrackProgress,
   cmdSetup,
@@ -136,6 +137,9 @@ async function main(): Promise<void> {
       break;
     case "_notify-done":
       cmdNotifyDone(rest, config);
+      break;
+    case "_auto-cleanup":
+      cmdAutoCleanup(rest, config);
       break;
     case "_track-progress":
       cmdTrackProgress(rest);

@@ -184,14 +184,15 @@ async function launchAgent(
     wtPath = worktreePath(id, config);
   }
 
-  // Create tmux window
-  createSession(id, wtPath);
+  // Create multiplexer session — returns cmux workspace ID or "tmux"
+  const sessionId = createSession(id, wtPath);
+  if (!sessionId) return null;
 
   const mode = headless ? "headless" : "interactive";
   const claudeCmd = buildClaudeCmd(prompt, mode, wtPath, config, extraArgs);
 
   if (useCmux()) {
-    const wsId = getCmuxWorkspaceId(id) || loadCmuxWorkspaceId(wtPath);
+    const wsId = sessionId;  // use the ID we just created, don't re-resolve
     cmuxUpdateState(id, wtPath, "starting", `Launching agent (${mode})`);
 
     if (mode === "interactive") {
@@ -382,7 +383,7 @@ export function cmdList(config: Config, brief = false): void {
     return;
   }
 
-  const root = execQuiet("git rev-parse --show-toplevel") || "";
+  const root = gitRoot();
   const lines = tmuxListWindows();
 
   interface AgentInfo {
@@ -539,7 +540,7 @@ export function cmdStop(args: string[], config?: Config): void {
   }
 
   // Fallback: try closing cmux workspace via marker file (works from outside cmux)
-  const root = execQuiet("git rev-parse --show-toplevel") || "";
+  const root = gitRoot();
   const wtDir = config?.worktreeDir || ".worktrees";
   const wtPath = root ? join(root, wtDir, id) : "";
   if (wtPath && tryCmuxCloseFromMarker(wtPath)) {
@@ -574,10 +575,11 @@ export function cmdResume(args: string[], config: Config): void {
     return;
   }
 
-  createSession(id, wtPath);
+  const sessionId = createSession(id, wtPath);
+  if (!sessionId) return;
 
   if (useCmux()) {
-    const wsId = getCmuxWorkspaceId(id) || loadCmuxWorkspaceId(wtPath);
+    const wsId = sessionId;
     cmuxUpdateState(id, wtPath, "running", `Resuming agent (${headless ? "headless" : "interactive"})`);
     if (!headless) {
       const modelFlag = config.model ? `--model ${config.model}` : "";
@@ -965,6 +967,21 @@ export function cmdNotifyDone(args: string[], config: Config): void {
   }
 }
 
+/** Auto-cleanup on tab/session close: always remove worktree, only delete branch if merged. */
+export function cmdAutoCleanup(args: string[], config: Config): void {
+  const id = args[0];
+  if (!id) return;
+
+  removeWorktree(id, config);
+
+  if (isBranchMerged(id, config.baseBranch)) {
+    spawnSync("git", ["branch", "-d", id], { stdio: "pipe" });
+    log.ok(`Auto-cleaned: ${id} (branch deleted — was merged)`);
+  } else {
+    log.ok(`Auto-cleaned: ${id} (worktree removed, branch kept)`);
+  }
+}
+
 /** Extract summary from agent log and post key findings to cmux sidebar. */
 function extractSummaryToSidebar(wsId: string, wtPath: string): void {
   const logFile = join(wtPath, ".dispatch.log");
@@ -1019,7 +1036,7 @@ export function cmdFind(args: string[]): void {
 
   if (!useCmux()) {
     // Fallback: grep through log files
-    const root = execQuiet("git rev-parse --show-toplevel") || "";
+    const root = gitRoot();
     if (!root) { log.error("Not in a git repo"); return; }
     const wtDir = join(root, ".worktrees");
     if (!existsSync(wtDir)) { log.info("No worktrees to search"); return; }
