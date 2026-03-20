@@ -11,6 +11,7 @@ import {
   readFileSync,
   existsSync,
 } from "fs";
+import { getAgentSummaries } from "./history.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
@@ -55,7 +56,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "dispatch_run",
       description:
         "Launch a Claude Code agent in an isolated git worktree. " +
-        "Pass the full task prompt inline. Returns agent ID and branch name.",
+        "Pass the full task prompt inline. Returns agent ID and branch name. " +
+        "Agents run headless by default (set max_turns to limit). " +
+        "After launching, use dispatch_status to check progress.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -92,7 +95,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "dispatch_list",
       description:
-        "List all running dispatch agents with their status (running/idle/exited).",
+        "List all dispatch agents: active (running/idle/exited) and recently completed (last 24h) with outcomes and PR links. " +
+        "Start here to see what agents exist, then use dispatch_status on individual agents for details. " +
+        "Returns agent IDs you can pass to dispatch_status, dispatch_logs, dispatch_stop, etc.",
       inputSchema: { type: "object" as const, properties: {} },
     },
     {
@@ -148,7 +153,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "dispatch_logs",
       description:
-        "Get recent output from a dispatch agent (log file or tmux capture).",
+        "Get raw output lines from a dispatch agent's log file or tmux capture. " +
+        "Falls back to history summary if the agent has been cleaned up. " +
+        "For a structured digest, use dispatch_status instead — it's faster and more useful.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -157,6 +164,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "Number of lines to return. Default: 50.",
           },
+        },
+        required: ["agent_id"],
+      },
+    },
+    {
+      name: "dispatch_status",
+      description:
+        "Get a structured status summary of a dispatch agent: turns completed, files modified, commits made, recent actions, and last output. " +
+        "Works for active agents, completed agents, and even cleaned-up agents (via persistent history). " +
+        "PREFERRED over dispatch_logs — use this first to understand what an agent did. " +
+        "Use dispatch_logs only if you need raw output or more detail.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          agent_id: { type: "string", description: "Agent ID" },
         },
         required: ["agent_id"],
       },
@@ -276,6 +298,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{ type: "text", text: stripAnsi(output).trim() }],
         };
       } catch {
+        // Final fallback: check persistent history for summary
+        const summaries = getAgentSummaries();
+        const agent = summaries.find((a) => a.id === agent_id);
+        if (agent) {
+          const parts: string[] = [`Agent '${agent_id}' — ${agent.status}`];
+          if (agent.launchedAt) parts.push(`Launched: ${new Date(agent.launchedAt).toLocaleString()}`);
+          if (agent.completedAt) parts.push(`Completed: ${new Date(agent.completedAt).toLocaleString()}`);
+          if (agent.pr) parts.push(`PR: ${agent.pr}`);
+          if (agent.summary) parts.push(`\nLast output:\n${agent.summary}`);
+          if (agent.prompt) parts.push(`\nOriginal prompt:\n${agent.prompt}`);
+          return {
+            content: [{ type: "text", text: parts.join("\n") }],
+          };
+        }
         return {
           content: [
             {
@@ -285,6 +321,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+    }
+
+    case "dispatch_status": {
+      const { agent_id } = args as Record<string, any>;
+      const output = dispatch(`status ${agent_id}`);
+      return { content: [{ type: "text", text: output }] };
     }
 
     case "dispatch_prune": {

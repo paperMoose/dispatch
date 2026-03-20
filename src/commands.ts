@@ -49,6 +49,7 @@ import {
   tryCmuxCloseFromMarker,
 } from "./cmux.js";
 import type { AgentState } from "./cmux.js";
+import { recordEvent, getRecentCompletions, getAgentSummaries } from "./history.js";
 
 export const TICKET_RE = /^[A-Z]+-[0-9]+$/;
 
@@ -249,6 +250,16 @@ async function launchAgent(
     );
   }
 
+  // Record launch in persistent history
+  recordEvent({
+    id,
+    event: "launched",
+    ts: new Date().toISOString(),
+    prompt: prompt.slice(0, 200),
+    branch,
+    mode,
+  });
+
   console.log();
   log.ok(`Agent ${fmt.BOLD}${id}${fmt.NC} launched (${mode})`);
   log.dim(`  Worktree: ${wtPath}`);
@@ -379,7 +390,51 @@ export function cmdList(config: Config, brief = false): void {
   ensureMultiplexer();
 
   if (!tmuxHasSession()) {
-    log.info("No dispatch session running");
+    // No active sessions — but show recent completions if any
+    const recent = getRecentCompletions(24);
+    if (recent.length === 0) {
+      log.info("No dispatch agents running or recently completed");
+      return;
+    }
+    if (brief) {
+      console.log("No active agents.");
+      console.log("");
+      console.log("Recently completed:");
+      for (const r of recent) {
+        const prTag = r.pr ? `  ${r.pr}` : "";
+        const time = r.completedAt ? new Date(r.completedAt).toLocaleTimeString() : "";
+        const summaryLine = r.summary
+          ? r.summary.split("\n").filter((l: string) => l.trim())[0]?.slice(0, 80) || ""
+          : "";
+        console.log(`  ✓ ${r.id}  (${r.status})  ${time}${prTag}`);
+        if (summaryLine) console.log(`    ⤷ ${summaryLine}`);
+      }
+      return;
+    }
+    console.log();
+    log.info("No active agents");
+    console.log();
+    console.log(`${fmt.BOLD}Recently Completed${fmt.NC}  ${fmt.DIM}(last 24h)${fmt.NC}`);
+    console.log(
+      `${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`,
+    );
+    for (const r of recent) {
+      const prTag = r.pr ? `  ${fmt.BLUE}${r.pr}${fmt.NC}` : "";
+      const time = r.completedAt
+        ? `${fmt.DIM}${new Date(r.completedAt).toLocaleTimeString()}${fmt.NC}`
+        : "";
+      console.log(
+        `  ${fmt.DIM}✓${fmt.NC} ${fmt.BOLD}${r.id}${fmt.NC}  ${time}${prTag}`,
+      );
+      if (r.summary) {
+        const short = r.summary.split("\n").filter((l: string) => l.trim())[0] || "";
+        if (short) {
+          const display = short.length > 80 ? short.slice(0, 77) + "..." : short;
+          console.log(`    ${fmt.DIM}⤷ ${display}${fmt.NC}`);
+        }
+      }
+    }
+    console.log();
     return;
   }
 
@@ -467,11 +522,28 @@ export function cmdList(config: Config, brief = false): void {
     agents.push({ name, status, statusIcon, runtime, lastLine, pr });
   }
 
+  // Get recent completions from history (agents no longer running)
+  const activeNames = new Set(agents.map((a) => a.name));
+  const recent = getRecentCompletions(24).filter((r) => !activeNames.has(r.id));
+
   if (brief) {
-    // Compact format: one line per agent, for MCP consumption
+    // Compact format for MCP consumption
     for (const a of agents) {
       const prTag = a.pr ? `  ${a.pr}` : "";
       console.log(`${a.statusIcon} ${a.name}  (${a.status})${a.runtime ? `  ${a.runtime}` : ""}${prTag}`);
+    }
+    if (recent.length > 0) {
+      console.log("");
+      console.log("Recently completed:");
+      for (const r of recent) {
+        const prTag = r.pr ? `  ${r.pr}` : "";
+        const time = r.completedAt ? new Date(r.completedAt).toLocaleTimeString() : "";
+        const summaryLine = r.summary
+          ? r.summary.split("\n").filter((l: string) => l.trim())[0]?.slice(0, 80) || ""
+          : "";
+        console.log(`  ✓ ${r.id}  (${r.status})  ${time}${prTag}`);
+        if (summaryLine) console.log(`    ⤷ ${summaryLine}`);
+      }
     }
     return;
   }
@@ -492,7 +564,313 @@ export function cmdList(config: Config, brief = false): void {
     }
   }
 
+  if (recent.length > 0) {
+    console.log();
+    console.log(`${fmt.BOLD}Recently Completed${fmt.NC}  ${fmt.DIM}(last 24h)${fmt.NC}`);
+    console.log(
+      `${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`,
+    );
+    for (const r of recent) {
+      const prTag = r.pr ? `  ${fmt.BLUE}${r.pr}${fmt.NC}` : "";
+      const time = r.completedAt
+        ? `${fmt.DIM}${new Date(r.completedAt).toLocaleTimeString()}${fmt.NC}`
+        : "";
+      console.log(
+        `  ${fmt.DIM}✓${fmt.NC} ${fmt.BOLD}${r.id}${fmt.NC}  ${time}${prTag}`,
+      );
+      if (r.summary) {
+        const short = r.summary.split("\n").filter((l: string) => l.trim())[0] || "";
+        if (short) {
+          const display = short.length > 80 ? short.slice(0, 77) + "..." : short;
+          console.log(`    ${fmt.DIM}⤷ ${display}${fmt.NC}`);
+        }
+      }
+    }
+  }
+
   console.log();
+}
+
+export function cmdHistory(args: string[]): void {
+  const limit = parseInt(args.find((a) => /^\d+$/.test(a)) || "20", 10);
+  const summaries = getAgentSummaries().slice(0, limit);
+
+  if (summaries.length === 0) {
+    log.info("No agent history");
+    return;
+  }
+
+  console.log();
+  console.log(`${fmt.BOLD}Agent History${fmt.NC}  ${fmt.DIM}(last ${summaries.length})${fmt.NC}`);
+  console.log(
+    `${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`,
+  );
+
+  for (const a of summaries) {
+    const statusMap: Record<string, string> = {
+      launched: `${fmt.GREEN}●${fmt.NC} launched`,
+      completed: `${fmt.BLUE}●${fmt.NC} completed`,
+      stopped: `${fmt.YELLOW}●${fmt.NC} stopped`,
+      cleaned: `${fmt.DIM}●${fmt.NC} cleaned`,
+    };
+    const statusStr = statusMap[a.status] || a.status;
+    const time = a.completedAt || a.launchedAt || "";
+    const timeStr = time ? fmt.DIM + new Date(time).toLocaleString() + fmt.NC : "";
+    const prStr = a.pr ? `  ${fmt.BLUE}${a.pr}${fmt.NC}` : "";
+
+    console.log(`  ${statusStr}  ${fmt.BOLD}${a.id}${fmt.NC}  ${timeStr}${prStr}`);
+    if (a.summary) {
+      const short = a.summary.split("\n").filter((l: string) => l.trim())[0] || "";
+      if (short) {
+        const display = short.length > 80 ? short.slice(0, 77) + "..." : short;
+        console.log(`    ${fmt.DIM}⤷ ${display}${fmt.NC}`);
+      }
+    }
+  }
+  console.log();
+}
+
+/** Look up PR info for a branch. Shared across commands. */
+export function getPrInfo(branch: string): string {
+  const prInfo = execQuiet(
+    `gh pr list --head "${branch}" --state all --json number,state,url --jq '.[0] | "#\\(.number) \\(.state) \\(.url)"'`,
+  );
+  if (prInfo && prInfo.startsWith("#") && !prInfo.includes("null")) return prInfo;
+  return "";
+}
+
+const MAX_ACTIONS = 8;
+
+/** Parse a .dispatch.log JSON stream and extract structured status. */
+export function parseAgentLog(logContent: string): {
+  turns: number;
+  filesModified: string[];
+  toolsUsed: Map<string, number>;
+  commits: string[];
+  lastActions: string[];
+  lastText: string;
+} {
+  let turnCount = 0;
+  const filesModified = new Set<string>();
+  const toolsUsed = new Map<string, number>();
+  const commits: string[] = [];
+  // Ring buffer — only keep the last MAX_ACTIONS entries
+  const lastActions: string[] = [];
+  let lastText = "";
+
+  const lines = logContent.split("\n");
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let obj: any;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (obj.type === "assistant") {
+      turnCount++;
+      const content = obj.message?.content;
+      if (!Array.isArray(content)) continue;
+
+      for (const block of content) {
+        if (block.type === "text" && block.text) {
+          lastText = block.text;
+        }
+        if (block.type === "tool_use") {
+          const name = block.name || "unknown";
+          toolsUsed.set(name, (toolsUsed.get(name) || 0) + 1);
+
+          // Track file modifications
+          const input = block.input || {};
+          if (
+            (name === "Edit" || name === "Write" || name === "NotebookEdit") &&
+            input.file_path
+          ) {
+            filesModified.add(input.file_path);
+          }
+
+          // Track commits from Bash
+          if (name === "Bash" && typeof input.command === "string") {
+            const cmd = input.command;
+            if (cmd.includes("git commit") || cmd.includes("git push")) {
+              const msgMatch = cmd.match(/-m\s+["']([^"']+)["']/);
+              if (msgMatch) {
+                commits.push(msgMatch[1].slice(0, 100));
+              } else if (cmd.includes("git push")) {
+                pushAction("Pushed to remote");
+              }
+            }
+            if (cmd.includes("gh pr create")) {
+              pushAction("Created PR");
+            }
+          }
+
+          // Build action description
+          if (name === "Edit" && input.file_path) {
+            pushAction(`Edited ${basename(input.file_path)}`);
+          } else if (name === "Write" && input.file_path) {
+            pushAction(`Created ${basename(input.file_path)}`);
+          } else if (name === "Read" && input.file_path) {
+            pushAction(`Read ${basename(input.file_path)}`);
+          } else if (name === "Grep") {
+            pushAction(`Searched for "${(input.pattern || "").slice(0, 30)}"`);
+          } else if (name === "Bash" && input.command) {
+            pushAction(`Ran: ${input.command.slice(0, 50)}`);
+          }
+        }
+      }
+    }
+  }
+
+  function pushAction(action: string) {
+    if (lastActions.length >= MAX_ACTIONS) lastActions.shift();
+    lastActions.push(action);
+  }
+
+  return {
+    turns: turnCount,
+    filesModified: Array.from(filesModified),
+    toolsUsed,
+    commits,
+    lastActions,
+    lastText,
+  };
+}
+
+/** Format status for display (used by both CLI and MCP). */
+export function formatStatus(
+  id: string,
+  status: string,
+  parsed: ReturnType<typeof parseAgentLog>,
+  pr?: string,
+): string {
+  const lines: string[] = [];
+  lines.push(`Agent: ${id}  (${status})`);
+  lines.push(`Turns: ${parsed.turns}`);
+
+  if (pr) lines.push(`PR: ${pr}`);
+
+  if (parsed.commits.length > 0) {
+    lines.push(`Commits: ${parsed.commits.length}`);
+    for (const c of parsed.commits.slice(-3)) {
+      lines.push(`  - ${c}`);
+    }
+  }
+
+  if (parsed.filesModified.length > 0) {
+    lines.push(`Files modified: ${parsed.filesModified.length}`);
+    // Show just filenames, not full paths
+    for (const f of parsed.filesModified.slice(-10)) {
+      lines.push(`  - ${basename(f)}`);
+    }
+    if (parsed.filesModified.length > 10) {
+      lines.push(`  ... and ${parsed.filesModified.length - 10} more`);
+    }
+  }
+
+  if (parsed.lastActions.length > 0) {
+    lines.push("");
+    lines.push("Recent actions:");
+    for (const a of parsed.lastActions) {
+      lines.push(`  ${a}`);
+    }
+  }
+
+  // Last assistant message (truncated)
+  if (parsed.lastText) {
+    const textLines = parsed.lastText.split("\n").filter((l: string) => l.trim());
+    const preview = textLines.slice(-3).join("\n");
+    if (preview) {
+      lines.push("");
+      lines.push("Last output:");
+      lines.push(preview.slice(0, 300));
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function cmdStatus(args: string[], config: Config): void {
+  const id = args[0];
+  if (!id) {
+    log.error("Usage: dispatch status <agent-id>");
+    process.exit(1);
+  }
+
+  const wtPath = worktreePath(id, config);
+  const logFile = join(wtPath, ".dispatch.log");
+
+  // Load history once for both state detection and final fallback
+  const histSummaries = getAgentSummaries();
+  const hist = histSummaries.find((s) => s.id === id);
+
+  // Determine agent state
+  let agentStatus = "unknown";
+  if (sessionExists(id)) {
+    if (useCmux()) {
+      agentStatus = "running";
+    } else {
+      const windowLines = tmuxListWindows();
+      for (const line of windowLines.split("\n")) {
+        const [name, pid] = line.split("|");
+        if (name === id && pid && execQuiet(`pgrep -P ${pid}`) !== null) {
+          agentStatus = "running";
+        } else if (name === id) {
+          agentStatus = "idle";
+        }
+      }
+    }
+  } else if (hist) {
+    agentStatus = hist.status;
+  }
+
+  // Try log file first
+  if (existsSync(logFile)) {
+    const content = readFileSync(logFile, "utf-8");
+    const parsed = parseAgentLog(content);
+    const pr = getPrInfo(id);
+
+    const output = formatStatus(id, agentStatus, parsed, pr);
+    console.log();
+    console.log(output);
+    console.log();
+    return;
+  }
+
+  // Fallback: screen capture for interactive agents
+  if (sessionExists(id)) {
+    const capture = tmuxCapture(id, 30);
+    console.log();
+    console.log(`Agent: ${id}  (${agentStatus})`);
+    console.log(`Mode: interactive (no log file)`);
+    console.log();
+    console.log("Screen capture:");
+    console.log(capture);
+    console.log();
+    return;
+  }
+
+  // Final fallback: history
+  if (hist) {
+    console.log();
+    console.log(`Agent: ${id}  (${hist.status})`);
+    if (hist.launchedAt) console.log(`Launched: ${new Date(hist.launchedAt).toLocaleString()}`);
+    if (hist.completedAt) console.log(`Completed: ${new Date(hist.completedAt).toLocaleString()}`);
+    if (hist.pr) console.log(`PR: ${hist.pr}`);
+    if (hist.summary) {
+      console.log();
+      console.log("Last output:");
+      const preview = hist.summary.split("\n").filter((l: string) => l.trim()).slice(-5).join("\n");
+      console.log(preview.slice(0, 500));
+    }
+    console.log();
+    return;
+  }
+
+  log.error(`Agent '${id}' not found`);
+  process.exit(1);
 }
 
 export function cmdLogs(args: string[], config: Config): void {
@@ -535,6 +913,7 @@ export function cmdStop(args: string[], config?: Config): void {
     tmuxSendKeys(id, "C-c");
     spawnSync("sleep", ["1"]);
     tmuxKillWindow(id);
+    recordEvent({ id, event: "stopped", ts: new Date().toISOString() });
     log.ok(`Agent stopped: ${id}`);
     return;
   }
@@ -929,6 +1308,38 @@ export function cmdNotifyDone(args: string[], config: Config): void {
     `gh pr list --head "${agentId}" --state open --json url --jq '.[0].url'`,
   );
 
+  // Build summary from last lines of log file (avoid reading full file)
+  let summary = "";
+  const logFile = join(wtPath, ".dispatch.log");
+  if (existsSync(logFile)) {
+    const tail = execQuiet(`tail -30 '${logFile}'`);
+    if (tail) {
+      const jsonLines = tail.split("\n").reverse();
+      for (const jl of jsonLines) {
+        try {
+          const obj = JSON.parse(jl);
+          if (obj.type === "assistant" && obj.message?.content) {
+            const textBlock = obj.message.content.find((b: any) => b.type === "text");
+            if (textBlock?.text) {
+              summary = textBlock.text.slice(0, 500);
+              break;
+            }
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // Record completion in persistent history
+  const prTag = prUrl && prUrl.startsWith("http") ? prUrl : "";
+  recordEvent({
+    id: agentId,
+    event: "completed",
+    ts: new Date().toISOString(),
+    summary: summary.slice(0, 500),
+    pr: prTag,
+  });
+
   if (useCmux()) {
     const wsId = getCmuxWorkspaceId(agentId) || loadCmuxWorkspaceId(wtPath);
 
@@ -973,6 +1384,7 @@ export function cmdAutoCleanup(args: string[], config: Config): void {
   if (!id) return;
 
   removeWorktree(id, config);
+  recordEvent({ id, event: "cleaned", ts: new Date().toISOString() });
 
   if (isBranchMerged(id, config.baseBranch)) {
     spawnSync("git", ["branch", "-d", id], { stdio: "pipe" });

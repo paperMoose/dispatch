@@ -138,14 +138,16 @@ export function ensureWorktreeDir(config: Config): string {
 
   // Add to .gitignore if not already there
   const gitignore = join(root, ".gitignore");
-  const entry = `${config.worktreeDir}/`;
+  const entries = [`${config.worktreeDir}/`, ".dispatch-history.jsonl"];
   if (existsSync(gitignore)) {
     const content = readFileSync(gitignore, "utf-8");
-    if (!content.split("\n").includes(entry)) {
-      appendFileSync(gitignore, `\n${entry}\n`);
+    const lines = content.split("\n");
+    const missing = entries.filter((e) => !lines.includes(e));
+    if (missing.length > 0) {
+      appendFileSync(gitignore, "\n" + missing.join("\n") + "\n");
     }
   } else {
-    writeFileSync(gitignore, `${entry}\n`);
+    writeFileSync(gitignore, entries.join("\n") + "\n");
   }
 
   return dir;

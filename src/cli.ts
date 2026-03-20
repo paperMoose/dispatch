@@ -14,6 +14,8 @@ import {
   cmdFind,
   cmdTrackProgress,
   cmdSetup,
+  cmdHistory,
+  cmdStatus,
 } from "./commands.js";
 
 const VERSION = "0.6.3";
@@ -28,12 +30,14 @@ interactive mode to watch and guide them, or headless for fire-and-forget.
 Commands:
   dispatch run <ticket|prompt> [options]   Launch an agent
   dispatch list                            Show all running agents with status
+  dispatch status <id>                     Structured summary: turns, files, commits, last actions
   dispatch logs <id>                       Tail a headless agent's output
   dispatch stop <id>                       Send Ctrl-C and kill the tmux window
   dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
   dispatch cleanup --all [--delete-branch] Remove all worktrees
   dispatch prune [--delete-branch]         Remove worktrees with no active session
+  dispatch history [N]                     Show past agent runs (default: last 20)
   dispatch find <query>                    Search across all agent terminal content
   dispatch attach [id]                     Open tmux session (or jump to specific agent)
   dispatch setup                           Add dispatch docs to ~/.claude/CLAUDE.md
@@ -130,6 +134,12 @@ async function main(): Promise<void> {
       break;
     case "setup":
       cmdSetup();
+      break;
+    case "status":
+      cmdStatus(rest, config);
+      break;
+    case "history":
+      cmdHistory(rest);
       break;
     case "find":
     case "search":
