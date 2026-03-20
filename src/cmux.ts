@@ -100,7 +100,10 @@ export function cmuxNewWorkspace(command?: string): string | null {
   } catch {
     // Parse "workspace:N" ref from output
     const match = out.match(/workspace:\d+/);
-    return match ? match[0] : out || null;
+    if (match) return match[0];
+    const okMatch = out.match(/^OK\s+(.+)/);
+    if (okMatch) return okMatch[1].trim();
+    return out || null;
   }
 }
 
