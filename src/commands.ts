@@ -1044,6 +1044,8 @@ export function cmdCleanup(args: string[], config: Config): void {
         // Try closing cmux workspace even if sessionExists fails (e.g., outside cmux)
         tryCmuxCloseFromMarker(join(wtDir, name));
       }
+      // Always attempt to close cmux tab by name — worktree/marker may be gone
+      tmuxKillWindow(name);
       removeWorktree(name, config);
       if (deleteBranch) {
         const r = spawnSync("git", ["branch", "-D", name], { stdio: "pipe" });
@@ -1060,6 +1062,9 @@ export function cmdCleanup(args: string[], config: Config): void {
     } else {
       tryCmuxCloseFromMarker(worktreePath(id, config));
     }
+    // Always attempt to close cmux tab by name — worktree/marker may be gone
+    // but the tab can linger. tmuxKillWindow does title-based fallback lookup.
+    tmuxKillWindow(id);
     removeWorktree(id, config);
     if (deleteBranch) {
       const r = spawnSync("git", ["branch", "-D", id], { stdio: "pipe" });
