@@ -98,9 +98,12 @@ export function cmuxNewWorkspace(command?: string): string | null {
     const data = JSON.parse(out);
     return data.workspace_id || data.id || out;
   } catch {
-    // Parse "workspace:N" ref from output
+    // Parse non-JSON formats: "workspace:N" or "OK <UUID>"
     const match = out.match(/workspace:\d+/);
-    return match ? match[0] : out || null;
+    if (match) return match[0];
+    const okMatch = out.match(/^OK\s+([0-9A-Fa-f-]{36})/);
+    if (okMatch) return okMatch[1];
+    return out || null;
   }
 }
 
