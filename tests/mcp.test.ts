@@ -42,7 +42,7 @@ describe("MCP server", () => {
     assert.ok(init.result.capabilities.tools);
   });
 
-  it("lists all 6 tools", () => {
+  it("lists all 8 tools", () => {
     const responses = mcpCall([
       INIT_MSG,
       { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
@@ -54,8 +54,10 @@ describe("MCP server", () => {
       "dispatch_cleanup",
       "dispatch_list",
       "dispatch_logs",
+      "dispatch_prune",
       "dispatch_resume",
       "dispatch_run",
+      "dispatch_status",
       "dispatch_stop",
     ]);
   });
@@ -72,8 +74,9 @@ describe("MCP server", () => {
     assert.ok(runTool.inputSchema.properties.prompt);
     assert.ok(runTool.inputSchema.properties.ticket);
     assert.ok(runTool.inputSchema.properties.name);
-    assert.ok(runTool.inputSchema.properties.headless);
     assert.ok(runTool.inputSchema.properties.model);
+    assert.ok(runTool.inputSchema.properties.base_branch);
+    assert.ok(runTool.inputSchema.properties.max_turns);
   });
 
   it("dispatch_list returns content", () => {

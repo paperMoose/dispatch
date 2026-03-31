@@ -31,7 +31,7 @@ describe("buildClaudeCmd", () => {
     const cmd = buildClaudeCmd("do stuff", "headless", wtPath, makeConfig(), "");
     assert.ok(cmd.startsWith("claude -p"));
     assert.ok(cmd.includes("--allowedTools"));
-    assert.ok(cmd.includes("--output-format json"));
+    assert.ok(cmd.includes("--output-format stream-json"));
   });
 
   it("adds model flag when set", () => {

@@ -198,18 +198,19 @@ async function launchAgent(
 
     if (mode === "interactive") {
       const modelFlag = config.model ? `--model ${config.model}` : "";
-      cmuxSend(wsId!, `unset CLAUDECODE && claude ${modelFlag}`);
+      cmuxSend(wsId!, `unset CLAUDECODE && claude ${modelFlag} --allowedTools "WebSearch,WebFetch"`);
       waitForClaude(id, config.claudeTimeout);
       // Extra settle time — Claude's TUI needs a moment before accepting input
       spawnSync("sleep", ["2"]);
       cmuxUpdateState(id, wtPath, "starting", "Claude ready, sending prompt");
 
-      // Save prompt to file for reference
+      // Save prompt to file for reference (preserves original formatting)
       const pf = join(wtPath, ".dispatch-prompt.txt");
       writeFileSync(pf, prompt);
-      // Send prompt text, then explicit Enter keypress to submit
-      cmuxSend(wsId!, prompt);
-      spawnSync("sleep", ["1"]);
+      // Collapse newlines to spaces so cmuxSend doesn't fragment the prompt
+      // into multiple submissions (Claude Code TUI treats \n as Enter/submit).
+      cmuxSend(wsId!, prompt.replace(/\n+/g, " "));
+      spawnSync("sleep", ["3"]);
       cmuxSendKey(wsId!, "enter");
       // Clear dispatch status so cmux's native claude-hook takes over state tracking
       cmuxLog(wsId!, "Prompt sent — agent working");
@@ -228,7 +229,7 @@ async function launchAgent(
     // Launch claude, wait for it to be ready, then send prompt via paste-buffer
     const modelFlag = config.model ? `--model ${config.model}` : "";
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude ${modelFlag}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude ${modelFlag} --allowedTools \\"WebSearch,WebFetch\\"" Enter`,
     );
     waitForClaude(id, config.claudeTimeout);
 
@@ -241,6 +242,7 @@ async function launchAgent(
       `tmux paste-buffer -b "${bufName}" -t "${tmuxTarget(id)}"`,
     );
     execQuiet(`tmux delete-buffer -b "${bufName}"`);
+    spawnSync("sleep", ["3"]);
     execSync(`tmux send-keys -t "${tmuxTarget(id)}" Enter`);
   } else {
     // Headless: run with -p, tee to log, notify on completion
@@ -962,7 +964,7 @@ export function cmdResume(args: string[], config: Config): void {
     cmuxUpdateState(id, wtPath, "running", `Resuming agent (${headless ? "headless" : "interactive"})`);
     if (!headless) {
       const modelFlag = config.model ? `--model ${config.model}` : "";
-      cmuxSend(wsId!, `unset CLAUDECODE && claude --continue ${modelFlag}`);
+      cmuxSend(wsId!, `unset CLAUDECODE && claude --continue ${modelFlag} --allowedTools "WebSearch,WebFetch"`);
       log.ok(`Resumed agent: ${id} (interactive)`);
       if (!noAttach) tmuxAttach(id, false);
     } else {
@@ -975,7 +977,7 @@ export function cmdResume(args: string[], config: Config): void {
   } else if (!headless) {
     const modelFlag = config.model ? `--model ${config.model}` : "";
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude --continue ${modelFlag}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude --continue ${modelFlag} --allowedTools \\"WebSearch,WebFetch\\"" Enter`,
     );
     log.ok(`Resumed agent: ${id} (interactive)`);
     if (!noAttach) tmuxAttach(id, false);

@@ -66,7 +66,7 @@ describe("loadConfig", () => {
     try {
       const config = loadConfig();
       assert.equal(config.baseBranch, "dev");
-      assert.equal(config.model, "");
+      assert.equal(config.model, "opus");
       assert.equal(config.maxTurns, "");
       assert.equal(config.maxBudget, "");
       assert.equal(config.worktreeDir, ".worktrees");
