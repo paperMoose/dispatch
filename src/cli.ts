@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import {
   cmdRun,
@@ -19,7 +22,11 @@ import {
   cmdStatus,
 } from "./commands.js";
 
-const VERSION = "0.6.7";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(
+  readFileSync(join(__dirname, "..", "package.json"), "utf-8"),
+);
+const VERSION: string = pkg.version;
 
 function help(): void {
   console.log(`dispatch — Launch Claude Code agents in isolated git worktrees

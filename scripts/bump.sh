@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bump patch version, sync cli.ts, build, commit, push.
+# Bump patch version, build, commit, push. cli.ts reads version from package.json at runtime.
 set -euo pipefail
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
@@ -9,14 +9,11 @@ IFS='.' read -r major minor patch <<< "$OLD"
 NEW="$major.$minor.$((patch + 1))"
 sed -i '' "s/\"version\": \"$OLD\"/\"version\": \"$NEW\"/" package.json
 
-# Sync version constant in cli.ts
-sed -i '' "s/const VERSION = \"$OLD\"/const VERSION = \"$NEW\"/" src/cli.ts
-
 # Build
 npm run build
 
 # Commit and push
-git add package.json src/cli.ts
+git add package.json
 git commit -m "Bump to $NEW"
 git push origin main
 
