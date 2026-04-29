@@ -1204,6 +1204,151 @@ export function cmdPrune(args: string[], config: Config): void {
   log.ok(`Pruned ${stale.length} stale worktree(s)`);
 }
 
+/** Read cmux session JSON files and return the set of worktree directory names
+ * referenced anywhere in them. cmux state lives in
+ * ~/Library/Application Support/cmux/session-*.json on macOS — reading both
+ * the stable and nightly variants because users run either or both.
+ *
+ * cmux JSON-escapes forward slashes (`\/`), so we parse the JSON and walk
+ * the resulting object tree rather than regex-matching the raw text.
+ *
+ * Returns an empty set on any error so the caller can fall back safely.
+ */
+function getActiveCmuxWorktrees(worktreeDirName: string): Set<string> {
+  const result = new Set<string>();
+  const sessionDir = join(homedir(), "Library/Application Support/cmux");
+  if (!existsSync(sessionDir)) return result;
+
+  let files: string[];
+  try {
+    files = readdirSync(sessionDir).filter(
+      (f) => f.startsWith("session-") && f.endsWith(".json"),
+    );
+  } catch {
+    return result;
+  }
+
+  const escDir = worktreeDirName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`/${escDir}/([^/]+)`);
+
+  // Walk an arbitrary object tree, collecting the first path segment that
+  // appears under /<worktreeDirName>/ in any string value.
+  const walk = (node: unknown): void => {
+    if (node === null || node === undefined) return;
+    if (typeof node === "string") {
+      const m = re.exec(node);
+      if (m) result.add(m[1]);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (typeof node === "object") {
+      for (const v of Object.values(node as Record<string, unknown>)) walk(v);
+    }
+  };
+
+  for (const f of files) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(join(sessionDir, f), "utf-8"));
+    } catch {
+      continue;
+    }
+    walk(parsed);
+  }
+  return result;
+}
+
+/** Reap orphaned worktrees: worktrees on disk whose cmux tab has been closed.
+ *
+ * Uses cmux's session JSON as the source of truth for "active". Any worktree
+ * dir not referenced in cmux state is considered orphaned and removed.
+ * Branches and unpushed commits survive — `removeWorktree` only touches the
+ * working tree directory + worktree metadata.
+ */
+export function cmdReap(args: string[], config: Config): void {
+  const dryRun = args.includes("--dry-run");
+  const deleteBranch = args.includes("--delete-branch");
+
+  const root = gitRoot();
+  const wtDir = join(root, config.worktreeDir);
+
+  if (!existsSync(wtDir)) {
+    log.info("No worktrees to reap");
+    return;
+  }
+
+  const active = getActiveCmuxWorktrees(config.worktreeDir);
+  if (active.size === 0) {
+    log.warn(
+      "No active cmux worktrees found — refusing to reap (cmux state missing or unreadable)",
+    );
+    log.info(`Looked in: ~/Library/Application Support/cmux/session-*.json`);
+    return;
+  }
+
+  let entries: string[];
+  try {
+    entries = readdirSync(wtDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch {
+    log.info("No worktrees to reap");
+    return;
+  }
+
+  const orphans = entries.filter((n) => !active.has(n));
+
+  if (orphans.length === 0) {
+    log.ok(
+      `No orphan worktrees (${entries.length} on disk, all in cmux session)`,
+    );
+    return;
+  }
+
+  console.log();
+  console.log(`${fmt.BOLD}Orphan worktrees${fmt.NC}  ${fmt.DIM}(no cmux tab)${fmt.NC}`);
+  console.log(
+    `${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`,
+  );
+  for (const name of orphans) {
+    console.log(`  ${fmt.RED}●${fmt.NC} ${name}`);
+  }
+  console.log();
+  console.log(
+    `${fmt.DIM}cmux active: ${active.size}  on disk: ${entries.length}  orphans: ${orphans.length}${fmt.NC}`,
+  );
+  console.log();
+
+  if (dryRun) {
+    log.info(
+      `${orphans.length} orphan(s) would be reaped. Run without --dry-run to remove.`,
+    );
+    return;
+  }
+
+  let removed = 0;
+  for (const name of orphans) {
+    // Best-effort tmux/cmux cleanup; tolerate failures because the tab is
+    // already gone for orphans (that's why they're orphaned).
+    tmuxKillWindow(name);
+    removeWorktree(name, config);
+    if (deleteBranch) {
+      const r = spawnSync("git", ["branch", "-D", name], { stdio: "pipe" });
+      if (r.status === 0) {
+        log.ok(`Deleted branch: ${name}`);
+      }
+    }
+    removed += 1;
+  }
+
+  execQuiet("git worktree prune");
+  console.log();
+  log.ok(`Reaped ${removed} orphan worktree(s)`);
+}
+
 export function cmdDashboard(config: Config): void {
   if (!useCmux()) {
     log.error("Dashboard requires cmux");

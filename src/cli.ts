@@ -7,6 +7,7 @@ import {
   cmdResume,
   cmdCleanup,
   cmdPrune,
+  cmdReap,
   cmdDashboard,
   cmdAttach,
   cmdNotifyDone,
@@ -37,6 +38,8 @@ Commands:
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
   dispatch cleanup --all [--delete-branch] Remove all worktrees
   dispatch prune [--delete-branch]         Remove worktrees with no active session
+  dispatch reap [--dry-run] [--delete-branch]
+                                           Remove worktrees whose cmux tab has been closed
   dispatch history [N]                     Show past agent runs (default: last 20)
   dispatch find <query>                    Search across all agent terminal content
   dispatch attach [id]                     Open tmux session (or jump to specific agent)
@@ -125,6 +128,9 @@ async function main(): Promise<void> {
       break;
     case "prune":
       cmdPrune(rest, config);
+      break;
+    case "reap":
+      cmdReap(rest, config);
       break;
     case "dashboard":
       cmdDashboard(config);
