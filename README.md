@@ -199,10 +199,29 @@ When the schedule fires, launchd invokes `scripts/dispatch-cron-wrapper.sh`. The
 
 1. Picks up your interactive shell's `PATH` (so `gcloud`, `secret-agent`, `uv`, `claude`, `dispatch` are reachable).
 2. Loads metadata from `~/.dispatch/schedules/<name>.yml`.
-3. `cd`s into `--repo` if set.
-4. Runs `dispatch run --headless --no-attach --prompt-file <path> --name <branch-prefix>-YYYYMMDD-HHMM` (plus `--model` / `--max-turns` if set), or `--command "<shell>"` for raw commands.
-5. Tees stdout/stderr to `~/.dispatch/scheduled-logs/<name>-<timestamp>.log`.
-6. Self-removes the plist + metadata if the schedule was a `--at` one-off.
+3. Runs the **idempotency gate**: `dispatch _schedule-should-fire <name>` checks whether the current cron slot has already been served (via `~/.dispatch/schedules/<name>.last_success`). If yes, the wrapper exits without doing work. This is what keeps `RunAtLoad` from re-firing the schedule on every routine login (see "Catch-up" below).
+4. `cd`s into `--repo` if set.
+5. Runs `dispatch run --headless --no-attach --prompt-file <path> --name <branch-prefix>-YYYYMMDD-HHMM` (plus `--model` / `--max-turns` if set), or `--command "<shell>"` for raw commands.
+6. Tees stdout/stderr to `~/.dispatch/scheduled-logs/<name>-<timestamp>.log`.
+7. On `rc=0`, writes the current timestamp to `~/.dispatch/schedules/<name>.last_success`.
+8. Self-removes the plist + metadata if the schedule was a `--at` one-off (the plist is removed *before* the work, so a crashed wrapper can't strand it).
+
+### Catch-up after sleep / shutdown
+
+Each plist sets `RunAtLoad: true` and the wrapper guards against double-firing via the `last_success` state file. The combined effect:
+
+- **Mac asleep across the cron slot**: launchd's native coalescing fires the missed event on wake. Gate sees stale `last_success`, fires.
+- **Mac fully off across the cron slot** (user-level LaunchAgents don't run while logged out): on next login, `RunAtLoad` triggers the wrapper. Gate sees stale `last_success`, fires.
+- **Routine login during the same cron slot it just ran in**: gate sees fresh `last_success` covering the prev fire slot, exits cleanly. No double-fire.
+- **First-ever fire after `dispatch schedule add`**: no `last_success` on disk, gate fires.
+- **One-off (`--at`)**: gate compares `now` to `run_at`; skips if too early, fires once otherwise. The plist self-removes after the first successful fire (and pre-emptively before invoking work, so a crashed wrapper can't leave an annual-fire orphan).
+
+To force a manual fire that bypasses the gate:
+
+```bash
+dispatch schedule run <name>           # bypasses gate; preferred
+DISPATCH_SCHEDULE_FORCE=1 ./scripts/dispatch-cron-wrapper.sh <name>   # raw equivalent
+```
 
 ### Notifications
 
