@@ -153,6 +153,78 @@ dispatch run HEY-837
 | **Output** | Live in the tab | `dispatch logs <id>` |
 | **Use case** | Complex tasks, review as you go | Simple/well-defined tasks |
 
+## Scheduled runs (macOS)
+
+`dispatch schedule` registers a recurring or one-off `dispatch run` invocation as a launchd agent. This is for jobs that need full local auth (gcloud, secret-agent, env files, working keychains) — things a remote agent platform can't reach.
+
+It writes a plist to `~/Library/LaunchAgents/com.dispatch.<name>.plist`, stores schedule metadata in `~/.dispatch/schedules/<name>.yml`, and pipes each fire's output to a timestamped log under `~/.dispatch/scheduled-logs/`.
+
+```bash
+# Register a recurring schedule
+dispatch schedule add voice-reliability-check \
+    --cron "0 16 * * 5" \
+    --prompt-file ~/git/dispatch/prompts/voice-reliability-check.md \
+    --branch-prefix reliability \
+    --model opus \
+    --repo ~/git/vunda-customers/noah/repos/noah-server \
+    --max-turns 30 \
+    --notify slack
+
+# One-off run at a specific moment
+dispatch schedule add release-cut \
+    --at "2026-05-08T09:00:00" \
+    --prompt-file ~/prompts/release-cut.md
+
+# Inspect / manage
+dispatch schedule list
+dispatch schedule show voice-reliability-check
+dispatch schedule run voice-reliability-check     # fire immediately, bypass cron
+dispatch schedule disable voice-reliability-check # launchctl unload, keep plist
+dispatch schedule enable voice-reliability-check
+dispatch schedule remove voice-reliability-check  # unload + delete plist + metadata
+```
+
+### Cron subset
+
+Standard 5-field cron: `minute hour day-of-month month day-of-week`. Supported syntax:
+
+- `*` (any), `N` (specific value), `M-N` (range), `M,N` (list), `*/N` or `M-N/S` (step).
+- Sunday accepts both `0` and `7` (normalized to launchd's `0`).
+
+Not supported: `L` (last), `W` (nearest weekday), `#` (nth weekday), `?` (no-specific). The CLI errors out if you use them.
+
+### How fires work
+
+When the schedule fires, launchd invokes `scripts/dispatch-cron-wrapper.sh`. The wrapper:
+
+1. Picks up your interactive shell's `PATH` (so `gcloud`, `secret-agent`, `uv`, `claude`, `dispatch` are reachable).
+2. Loads metadata from `~/.dispatch/schedules/<name>.yml`.
+3. `cd`s into `--repo` if set.
+4. Runs `dispatch run --headless --no-attach --prompt-file <path> --name <branch-prefix>-YYYYMMDD-HHMM` (plus `--model` / `--max-turns` if set), or `--command "<shell>"` for raw commands.
+5. Tees stdout/stderr to `~/.dispatch/scheduled-logs/<name>-<timestamp>.log`.
+6. Self-removes the plist + metadata if the schedule was a `--at` one-off.
+
+### Notifications
+
+`--notify slack` currently writes a marker line to the per-fire log. There is no clean send-only Slack helper in this repo yet — the prompt itself is responsible for posting to Slack via the agent's own tool use. This is a v1 limitation; a real `--notify slack` wired to a CLI helper will land in a follow-up.
+
+### Worked example: voice-reliability-check
+
+`prompts/voice-reliability-check.md` is included as the first real schedule. Register it with:
+
+```bash
+dispatch schedule add voice-reliability-check \
+    --cron "0 16 * * 5" \
+    --prompt-file ~/git/dispatch/prompts/voice-reliability-check.md \
+    --branch-prefix reliability \
+    --model opus \
+    --repo ~/git/vunda-customers/noah/repos/noah-server \
+    --max-turns 30 \
+    --notify slack
+```
+
+That fires every Friday at 4pm local: it queries the dev DB for `CallRun` outcomes over the past week, computes IVR/SMS/pre-dial reliability metrics, compares against the Apr 28 baseline, and DMs Ryan a summary.
+
 ## Configuration
 
 ### Environment variables

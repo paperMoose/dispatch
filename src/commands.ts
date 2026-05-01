@@ -1,8 +1,29 @@
-import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync } from "fs";
-import { join, basename, resolve } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, unlinkSync } from "fs";
+import { join, basename, dirname, resolve } from "path";
 import { homedir } from "os";
 import { execSync, spawnSync } from "child_process";
 import type { Config } from "./config.js";
+import {
+  buildPlistXml,
+  cronToLaunchdIntervals,
+  dateToLaunchdInterval,
+  deleteScheduleMeta,
+  ensureMacOS,
+  findWrapperScript,
+  launchctlIsLoaded,
+  launchctlLoad,
+  launchctlUnload,
+  listSchedules,
+  metaPath,
+  nextCronFire,
+  plistLabel,
+  plistPath,
+  readScheduleMeta,
+  SCHEDULE_LOG_DIR,
+  SCHEDULE_META_DIR,
+  writeScheduleMeta,
+  type ScheduleMeta,
+} from "./schedule.js";
 import {
   log,
   fmt,
@@ -1716,5 +1737,443 @@ export function cmdSetup(): void {
     }
     writeFileSync(claudeMdPath, CLAUDE_MD_SNIPPET.trimStart());
     log.ok("Created ~/.claude/CLAUDE.md with dispatch section");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// dispatch schedule — local launchd-backed scheduled runs
+// ---------------------------------------------------------------------------
+function scheduleHelp(): void {
+  console.log(`dispatch schedule — Recurring or one-off agent runs via launchd
+
+Subcommands:
+  add <name>      Register a new schedule and load it
+  list            Show all schedules
+  show <name>     Print metadata + plist + status for one schedule
+  run <name>      Fire a schedule immediately (bypasses cron)
+  enable <name>   Load the plist (re-enable a disabled schedule)
+  disable <name>  Unload the plist but keep metadata + plist file
+  remove <name>   Unload and delete plist + metadata
+
+Add options:
+  --cron "<expr>"           5-field cron expression (e.g. "0 9 * * 5")
+  --at "<datetime>"         One-off run; ISO-ish local datetime (Date.parse compatible)
+  --prompt-file <path>      Prompt file the agent runs (required unless --command)
+  --command "<shell>"       Run a raw shell command instead of dispatch run
+  --branch-prefix <str>     Branch name prefix (default: schedule name)
+  --model <m>               Claude model (sonnet|opus|haiku)
+  --repo <path>             cd into this repo before invoking dispatch run
+  --max-turns <n>           Forwarded to dispatch run --max-turns
+  --notify slack|none       Notification channel (v1: just logs a line)
+
+Examples:
+  dispatch schedule add voice-check --cron "0 16 * * 5" \\
+      --prompt-file ~/git/dispatch/prompts/voice-reliability-check.md \\
+      --branch-prefix reliability --model opus \\
+      --repo ~/git/vunda-customers/noah/repos/noah-server \\
+      --max-turns 30 --notify slack
+  dispatch schedule add release-cut --at "2026-05-08T09:00:00" \\
+      --prompt-file ~/prompts/release-cut.md
+  dispatch schedule list
+  dispatch schedule remove voice-check
+`);
+}
+
+function parseAtDateTime(input: string): Date {
+  // Accept ISO-ish strings (with or without timezone). Defer to Date.parse.
+  const t = Date.parse(input);
+  if (Number.isNaN(t)) {
+    throw new Error(`Could not parse --at value "${input}". Use ISO format like 2026-05-08T09:00:00 or 2026-05-08T09:00:00-07:00`);
+  }
+  const d = new Date(t);
+  if (d.getTime() <= Date.now()) {
+    throw new Error(`--at "${input}" is in the past`);
+  }
+  return d;
+}
+
+function ensureScheduleDirs(): void {
+  for (const dir of [SCHEDULE_META_DIR, SCHEDULE_LOG_DIR]) {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  }
+}
+
+export interface ScheduleAddArgs {
+  name: string;
+  cron?: string;
+  at?: string;
+  promptFile?: string;
+  command?: string;
+  branchPrefix?: string;
+  model?: string;
+  repo?: string;
+  maxTurns?: string;
+  notify?: string;
+}
+
+export function parseScheduleAddArgs(args: string[]): ScheduleAddArgs {
+  const positional: string[] = [];
+  const out: ScheduleAddArgs = { name: "" };
+  let i = 0;
+  while (i < args.length) {
+    const a = args[i];
+    switch (a) {
+      case "--cron": out.cron = args[++i]; break;
+      case "--at": out.at = args[++i]; break;
+      case "--prompt-file": out.promptFile = args[++i]; break;
+      case "--command": out.command = args[++i]; break;
+      case "--branch-prefix": out.branchPrefix = args[++i]; break;
+      case "--model": out.model = args[++i]; break;
+      case "--repo": out.repo = args[++i]; break;
+      case "--max-turns": out.maxTurns = args[++i]; break;
+      case "--notify": out.notify = args[++i]; break;
+      default:
+        if (a.startsWith("--")) throw new Error(`Unknown flag: ${a}`);
+        positional.push(a);
+    }
+    i++;
+  }
+  if (positional.length !== 1) {
+    throw new Error("Usage: dispatch schedule add <name> --cron \"<expr>\" --prompt-file <path> [...]");
+  }
+  out.name = positional[0];
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(out.name)) {
+    throw new Error(`Schedule name must be alphanumeric (with - _ . allowed): "${out.name}"`);
+  }
+  if (!out.cron && !out.at) {
+    throw new Error("Must provide either --cron or --at");
+  }
+  if (out.cron && out.at) {
+    throw new Error("Cannot use both --cron and --at");
+  }
+  if (!out.promptFile && !out.command) {
+    throw new Error("Must provide either --prompt-file or --command");
+  }
+  if (out.promptFile && out.command) {
+    throw new Error("Cannot use both --prompt-file and --command");
+  }
+  return out;
+}
+
+function ensureWrapperExecutable(path: string): void {
+  // statSync throws if the wrapper is missing — let it propagate. A missing
+  // wrapper would otherwise cause silent launchd failures on every fire.
+  const s = statSync(path);
+  if ((s.mode & 0o111) === 0) {
+    const r = spawnSync("chmod", ["+x", path]);
+    if (r.status !== 0) {
+      throw new Error(`chmod +x ${path} failed (status ${r.status})`);
+    }
+  }
+}
+
+/** Manually expand a leading "~" — shells normally do this before args reach
+ *  us, but quoted paths slip through unexpanded. Apply uniformly to any
+ *  user-supplied path arg.
+ */
+function expandUserPath(p: string): string {
+  if (p.startsWith("~/") || p === "~") {
+    return resolve(p.replace(/^~/, homedir()));
+  }
+  return resolve(p);
+}
+
+function scheduleAdd(args: string[]): void {
+  ensureMacOS();
+  const parsed = parseScheduleAddArgs(args);
+
+  // ----- Validate everything BEFORE writing any state -----
+
+  // Wrapper must exist and be executable before we register a schedule that
+  // depends on it. Failing here is much friendlier than silent launchd errors
+  // on every fire.
+  const wrapper = findWrapperScript();
+  ensureWrapperExecutable(wrapper);
+
+  const promptFile = parsed.promptFile ? expandUserPath(parsed.promptFile) : undefined;
+  if (promptFile && !existsSync(promptFile)) {
+    throw new Error(`Prompt file not found: ${promptFile}`);
+  }
+  const repo = parsed.repo ? expandUserPath(parsed.repo) : undefined;
+  if (repo && !existsSync(repo)) {
+    throw new Error(`Repo path not found: ${repo}`);
+  }
+
+  // Build calendar intervals (may throw on bad cron / past --at)
+  let intervals;
+  let cron: string | undefined;
+  let runOnce = false;
+  let runAt: string | undefined;
+  if (parsed.at) {
+    const d = parseAtDateTime(parsed.at);
+    intervals = [dateToLaunchdInterval(d)];
+    runOnce = true;
+    runAt = d.toISOString();
+  } else {
+    cron = parsed.cron!;
+    intervals = cronToLaunchdIntervals(cron);
+  }
+
+  // Refuse to overwrite an existing schedule silently
+  if (existsSync(metaPath(parsed.name))) {
+    throw new Error(
+      `Schedule "${parsed.name}" already exists. Remove it first: dispatch schedule remove ${parsed.name}`,
+    );
+  }
+  const plist = plistPath(parsed.name);
+  if (existsSync(plist)) {
+    throw new Error(
+      `Plist already exists at ${plist}. Remove it first: dispatch schedule remove ${parsed.name}`,
+    );
+  }
+
+  // Build the plist content before writing anything (catches any
+  // generation errors while we still have nothing on disk).
+  const plistXml = buildPlistXml({ name: parsed.name, intervals, wrapperPath: wrapper });
+
+  const meta: ScheduleMeta = {
+    name: parsed.name,
+    cron,
+    run_once: runOnce || undefined,
+    run_at: runAt,
+    prompt_file: promptFile,
+    command: parsed.command,
+    branch_prefix: parsed.branchPrefix,
+    model: parsed.model,
+    repo,
+    max_turns: parsed.maxTurns,
+    notify: parsed.notify,
+    created_at: new Date().toISOString(),
+  };
+
+  // ----- Now write state. Roll back on any failure. -----
+  ensureScheduleDirs();
+  if (!existsSync(dirname(plist))) mkdirSync(dirname(plist), { recursive: true });
+
+  let metaWritten = false;
+  let plistWritten = false;
+  try {
+    writeScheduleMeta(meta);
+    metaWritten = true;
+    writeFileSync(plist, plistXml);
+    plistWritten = true;
+    launchctlLoad(plist);
+  } catch (err) {
+    if (plistWritten) {
+      try { unlinkSync(plist); } catch {}
+    }
+    if (metaWritten) {
+      try { deleteScheduleMeta(parsed.name); } catch {}
+    }
+    throw new Error(`Failed to register schedule: ${(err as Error).message}`);
+  }
+
+  log.ok(`Scheduled ${fmt.BOLD}${parsed.name}${fmt.NC}`);
+  log.dim(`  Plist:    ${plist}`);
+  log.dim(`  Metadata: ${metaPath(parsed.name)}`);
+  if (cron) log.dim(`  Cron:     ${cron}`);
+  if (runAt) log.dim(`  Fires at: ${runAt} (one-off)`);
+  log.dim(`  Logs:     ${SCHEDULE_LOG_DIR}/${parsed.name}-*.log`);
+}
+
+function scheduleList(): void {
+  ensureMacOS();
+  const schedules = listSchedules();
+  if (schedules.length === 0) {
+    log.info("No schedules registered");
+    return;
+  }
+
+  console.log();
+  console.log(`${fmt.BOLD}Schedules${fmt.NC}`);
+  console.log(`${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`);
+  for (const s of schedules) {
+    const loaded = launchctlIsLoaded(plistLabel(s.name));
+    const statusIcon = loaded ? `${fmt.GREEN}●${fmt.NC}` : `${fmt.YELLOW}○${fmt.NC}`;
+    const statusText = loaded ? "loaded" : "disabled";
+
+    const when = s.run_once
+      ? `at ${s.run_at} (one-off)`
+      : s.cron
+        ? s.cron
+        : "?";
+
+    let nextStr = "";
+    if (!s.run_once && s.cron) {
+      const next = nextCronFire(s.cron);
+      if (next) nextStr = `${fmt.DIM}next: ${next.toLocaleString()}${fmt.NC}`;
+    }
+
+    let lastStr = "";
+    if (existsSync(SCHEDULE_LOG_DIR)) {
+      try {
+        const logs = readdirSync(SCHEDULE_LOG_DIR)
+          .filter((f) => f.startsWith(`${s.name}-`) && f.endsWith(".log"))
+          .sort()
+          .reverse();
+        if (logs.length > 0) {
+          lastStr = `${fmt.DIM}last: ${logs[0].replace(`${s.name}-`, "").replace(".log", "")}${fmt.NC}`;
+        }
+      } catch {}
+    }
+
+    console.log(`  ${statusIcon} ${fmt.BOLD}${s.name}${fmt.NC}  ${fmt.DIM}(${statusText})${fmt.NC}`);
+    console.log(`    ${fmt.DIM}schedule:${fmt.NC} ${when}`);
+    if (nextStr) console.log(`    ${nextStr}`);
+    if (lastStr) console.log(`    ${lastStr}`);
+  }
+  console.log();
+}
+
+function scheduleShow(name: string): void {
+  ensureMacOS();
+  if (!name) {
+    log.error("Usage: dispatch schedule show <name>");
+    process.exit(1);
+  }
+  const meta = readScheduleMeta(name);
+  const loaded = launchctlIsLoaded(plistLabel(name));
+  const plist = plistPath(name);
+
+  console.log();
+  console.log(`${fmt.BOLD}${meta.name}${fmt.NC}  ${fmt.DIM}(${loaded ? "loaded" : "disabled"})${fmt.NC}`);
+  console.log(`${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`);
+  if (meta.cron) console.log(`  cron:          ${meta.cron}`);
+  if (meta.run_at) console.log(`  run_at:        ${meta.run_at}  (one-off)`);
+  if (meta.prompt_file) console.log(`  prompt_file:   ${meta.prompt_file}`);
+  if (meta.command) console.log(`  command:       ${meta.command}`);
+  if (meta.branch_prefix) console.log(`  branch_prefix: ${meta.branch_prefix}`);
+  if (meta.model) console.log(`  model:         ${meta.model}`);
+  if (meta.repo) console.log(`  repo:          ${meta.repo}`);
+  if (meta.max_turns) console.log(`  max_turns:     ${meta.max_turns}`);
+  if (meta.notify) console.log(`  notify:        ${meta.notify}`);
+  console.log(`  created_at:    ${meta.created_at}`);
+  console.log(`  plist:         ${plist}`);
+
+  if (meta.cron) {
+    const next = nextCronFire(meta.cron);
+    if (next) console.log(`  next fire:     ${next.toLocaleString()}`);
+  }
+
+  if (existsSync(SCHEDULE_LOG_DIR)) {
+    const logs = readdirSync(SCHEDULE_LOG_DIR)
+      .filter((f) => f.startsWith(`${name}-`) && f.endsWith(".log"))
+      .sort()
+      .reverse()
+      .slice(0, 5);
+    if (logs.length > 0) {
+      console.log();
+      console.log("Recent fires:");
+      for (const f of logs) console.log(`  ${join(SCHEDULE_LOG_DIR, f)}`);
+    }
+  }
+  console.log();
+}
+
+function scheduleRunNow(name: string): void {
+  ensureMacOS();
+  if (!name) {
+    log.error("Usage: dispatch schedule run <name>");
+    process.exit(1);
+  }
+  // Verify the schedule exists
+  readScheduleMeta(name);
+  const wrapper = findWrapperScript();
+  ensureWrapperExecutable(wrapper);
+  log.info(`Running schedule "${name}" now (foreground)...`);
+  const r = spawnSync("/bin/bash", [wrapper, name], { stdio: "inherit" });
+  if (r.status !== 0) {
+    log.warn(`Wrapper exited with status ${r.status}`);
+    process.exit(r.status ?? 1);
+  }
+}
+
+function scheduleEnable(name: string): void {
+  ensureMacOS();
+  if (!name) {
+    log.error("Usage: dispatch schedule enable <name>");
+    process.exit(1);
+  }
+  const plist = plistPath(name);
+  if (!existsSync(plist)) {
+    log.error(`No plist for "${name}" at ${plist}`);
+    process.exit(1);
+  }
+  launchctlLoad(plist);
+  log.ok(`Enabled: ${name}`);
+}
+
+function scheduleDisable(name: string): void {
+  ensureMacOS();
+  if (!name) {
+    log.error("Usage: dispatch schedule disable <name>");
+    process.exit(1);
+  }
+  const plist = plistPath(name);
+  if (!existsSync(plist)) {
+    log.error(`No plist for "${name}" at ${plist}`);
+    process.exit(1);
+  }
+  launchctlUnload(plist);
+  log.ok(`Disabled: ${name}  ${fmt.DIM}(plist + metadata kept)${fmt.NC}`);
+}
+
+function scheduleRemove(name: string): void {
+  ensureMacOS();
+  if (!name) {
+    log.error("Usage: dispatch schedule remove <name>");
+    process.exit(1);
+  }
+  const plist = plistPath(name);
+  if (existsSync(plist)) {
+    launchctlUnload(plist);
+    unlinkSync(plist);
+  }
+  deleteScheduleMeta(name);
+  log.ok(`Removed schedule: ${name}`);
+}
+
+export function cmdSchedule(args: string[]): void {
+  const sub = args[0];
+  const rest = args.slice(1);
+  try {
+    switch (sub) {
+      case "add":
+        scheduleAdd(rest);
+        return;
+      case "list":
+      case "ls":
+        scheduleList();
+        return;
+      case "show":
+        scheduleShow(rest[0]);
+        return;
+      case "run":
+        scheduleRunNow(rest[0]);
+        return;
+      case "enable":
+        scheduleEnable(rest[0]);
+        return;
+      case "disable":
+        scheduleDisable(rest[0]);
+        return;
+      case "remove":
+      case "rm":
+        scheduleRemove(rest[0]);
+        return;
+      case undefined:
+      case "help":
+      case "-h":
+      case "--help":
+        scheduleHelp();
+        return;
+      default:
+        log.error(`Unknown schedule subcommand: ${sub}`);
+        scheduleHelp();
+        process.exit(1);
+    }
+  } catch (err) {
+    log.error((err as Error).message);
+    process.exit(1);
   }
 }
