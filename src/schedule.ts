@@ -19,6 +19,33 @@ export function metaPath(name: string, baseDir: string = SCHEDULE_META_DIR): str
   return join(baseDir, `${name}.yml`);
 }
 
+export function lastSuccessPath(name: string, baseDir: string = SCHEDULE_META_DIR): string {
+  return join(baseDir, `${name}.last_success`);
+}
+
+export function readLastSuccess(name: string, baseDir: string = SCHEDULE_META_DIR): Date | null {
+  const path = lastSuccessPath(name, baseDir);
+  if (!existsSync(path)) return null;
+  try {
+    const raw = readFileSync(path, "utf-8").trim();
+    const t = Date.parse(raw);
+    if (Number.isNaN(t)) return null;
+    return new Date(t);
+  } catch {
+    return null;
+  }
+}
+
+export function writeLastSuccess(name: string, when: Date = new Date(), baseDir: string = SCHEDULE_META_DIR): void {
+  if (!existsSync(baseDir)) mkdirSync(baseDir, { recursive: true });
+  writeFileSync(lastSuccessPath(name, baseDir), when.toISOString() + "\n");
+}
+
+export function deleteLastSuccess(name: string, baseDir: string = SCHEDULE_META_DIR): void {
+  const path = lastSuccessPath(name, baseDir);
+  if (existsSync(path)) unlinkSync(path);
+}
+
 export function plistLabel(name: string): string {
   return `com.dispatch.${name}`;
 }
@@ -175,42 +202,71 @@ export function cronToLaunchdIntervals(cron: string): LaunchdInterval[] {
   return intervals;
 }
 
-/** Compute the next time a cron expression will fire after `from`. Returns null if none within a year. */
-export function nextCronFire(cron: string, from: Date = new Date()): Date | null {
+interface CronSets {
+  minutes: Set<number>;
+  hours: Set<number>;
+  days: Set<number>;
+  months: Set<number>;
+  weekdays: Set<number>;
+}
+
+function buildCronSets(cron: string): CronSets | null {
   const fields = cron.trim().split(/\s+/);
   if (fields.length !== 5) return null;
-  let minutes: Set<number>;
-  let hours: Set<number>;
-  let days: Set<number>;
-  let months: Set<number>;
-  let weekdays: Set<number>;
   try {
-    minutes = new Set(parseCronField(fields[0], MIN_RANGE));
-    hours = new Set(parseCronField(fields[1], HOUR_RANGE));
-    days = new Set(parseCronField(fields[2], DOM_RANGE));
-    months = new Set(parseCronField(fields[3], MONTH_RANGE));
-    weekdays = new Set(parseCronField(fields[4], DOW_RANGE));
+    return {
+      minutes: new Set(parseCronField(fields[0], MIN_RANGE)),
+      hours: new Set(parseCronField(fields[1], HOUR_RANGE)),
+      days: new Set(parseCronField(fields[2], DOM_RANGE)),
+      months: new Set(parseCronField(fields[3], MONTH_RANGE)),
+      weekdays: new Set(parseCronField(fields[4], DOW_RANGE)),
+    };
   } catch {
     return null;
   }
+}
+
+function cronMatches(s: CronSets, t: Date): boolean {
+  return (
+    s.minutes.has(t.getMinutes()) &&
+    s.hours.has(t.getHours()) &&
+    s.days.has(t.getDate()) &&
+    s.months.has(t.getMonth() + 1) &&
+    s.weekdays.has(t.getDay())
+  );
+}
+
+/** Compute the next time a cron expression will fire after `from`. Returns null if none within a year. */
+export function nextCronFire(cron: string, from: Date = new Date()): Date | null {
+  const sets = buildCronSets(cron);
+  if (!sets) return null;
 
   const t = new Date(from);
   t.setSeconds(0, 0);
   t.setMinutes(t.getMinutes() + 1);
 
-  // Cap iteration at ~1 year of minutes to avoid infinite loop on unsatisfiable expressions
   const maxIter = 60 * 24 * 366;
   for (let i = 0; i < maxIter; i++) {
-    if (
-      minutes.has(t.getMinutes()) &&
-      hours.has(t.getHours()) &&
-      days.has(t.getDate()) &&
-      months.has(t.getMonth() + 1) &&
-      weekdays.has(t.getDay())
-    ) {
-      return new Date(t);
-    }
+    if (cronMatches(sets, t)) return new Date(t);
     t.setMinutes(t.getMinutes() + 1);
+  }
+  return null;
+}
+
+/** Compute the most recent time a cron expression should have fired at or before `from`.
+ *  Returns null if there's no match within the last year (unsatisfiable expression). */
+export function prevCronFire(cron: string, from: Date = new Date()): Date | null {
+  const sets = buildCronSets(cron);
+  if (!sets) return null;
+
+  const t = new Date(from);
+  t.setSeconds(0, 0);
+  // "at or before from" — start at the current minute and walk backward.
+
+  const maxIter = 60 * 24 * 366;
+  for (let i = 0; i < maxIter; i++) {
+    if (cronMatches(sets, t)) return new Date(t);
+    t.setMinutes(t.getMinutes() - 1);
   }
   return null;
 }
@@ -280,7 +336,7 @@ export function buildPlistXml(opts: PlistOptions): string {
     <key>StartCalendarInterval</key>
 ${intervalsBlock}
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
     <key>StandardOutPath</key>
     <string>${escapeXml(join(logDir, `${name}.stdout.log`))}</string>
     <key>StandardErrorPath</key>

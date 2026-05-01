@@ -7,12 +7,18 @@ import {
   buildPlistXml,
   cronToLaunchdIntervals,
   dateToLaunchdInterval,
+  deleteLastSuccess,
   launchctlIsLoaded,
   launchctlLoad,
   launchctlUnload,
+  lastSuccessPath,
+  nextCronFire,
   parseCronField,
   parseScheduleMeta,
+  prevCronFire,
+  readLastSuccess,
   serializeScheduleMeta,
+  writeLastSuccess,
   writeScheduleMeta,
   readScheduleMeta,
   listSchedules,
@@ -210,7 +216,7 @@ describe("buildPlistXml", () => {
             <integer>5</integer>
         </dict>
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
     <key>StandardOutPath</key>
     <string>/tmp/logs/snapshot-test.stdout.log</string>
     <key>StandardErrorPath</key>
@@ -302,6 +308,80 @@ describe("ScheduleMeta YAML roundtrip", () => {
 
   it("rejects metadata without required fields", () => {
     assert.throws(() => parseScheduleMeta("cron: 0 9 * * 5"));
+  });
+});
+
+describe("prevCronFire", () => {
+  it("finds the slot at exactly `from` if it matches", () => {
+    // Friday, May 1, 2026 at 16:00 — matches "0 16 * * 5"
+    const friday4pm = new Date(2026, 4, 1, 16, 0, 0);
+    const got = prevCronFire("0 16 * * 5", friday4pm);
+    assert.ok(got);
+    assert.equal(got!.getTime(), friday4pm.getTime());
+  });
+
+  it("walks back to last Friday from a Monday", () => {
+    // Monday, May 4, 2026 at 10:00. The most recent matching slot is the
+    // immediately-preceding Friday at 16:00 (May 1, 2026 — three days back).
+    const monday = new Date(2026, 4, 4, 10, 0, 0);
+    const got = prevCronFire("0 16 * * 5", monday);
+    assert.ok(got);
+    const expected = new Date(2026, 4, 1, 16, 0, 0);
+    assert.equal(got!.getTime(), expected.getTime());
+  });
+
+  it("walks back across week boundary when before Friday's slot", () => {
+    // Friday, May 1, 2026 at 09:00 — Friday 4pm hasn't happened yet today,
+    // so prev fire is the previous Friday (April 24) at 16:00.
+    const fridayMorning = new Date(2026, 4, 1, 9, 0, 0);
+    const got = prevCronFire("0 16 * * 5", fridayMorning);
+    assert.ok(got);
+    const expected = new Date(2026, 3, 24, 16, 0, 0);
+    assert.equal(got!.getTime(), expected.getTime());
+  });
+
+  it("walks back to previous matching slot for hourly cron", () => {
+    const t = new Date(2026, 4, 1, 13, 35, 0);
+    const got = prevCronFire("0 * * * *", t);
+    assert.ok(got);
+    // 13:00 on the same day
+    const expected = new Date(2026, 4, 1, 13, 0, 0);
+    assert.equal(got!.getTime(), expected.getTime());
+  });
+
+  it("nextCronFire and prevCronFire bracket `from`", () => {
+    const t = new Date(2026, 4, 1, 12, 30, 0);
+    const next = nextCronFire("0 * * * *", t);
+    const prev = prevCronFire("0 * * * *", t);
+    assert.ok(next && prev);
+    assert.ok(prev!.getTime() < t.getTime());
+    assert.ok(next!.getTime() > t.getTime());
+  });
+});
+
+describe("last_success state file", () => {
+  it("round-trips a timestamp through write/read/delete", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-state-"));
+    const when = new Date("2026-05-01T20:00:00.000Z");
+
+    assert.equal(readLastSuccess("foo", dir), null);
+
+    writeLastSuccess("foo", when, dir);
+    const got = readLastSuccess("foo", dir);
+    assert.ok(got);
+    assert.equal(got!.toISOString(), when.toISOString());
+
+    const path = lastSuccessPath("foo", dir);
+    assert.ok(path.endsWith("foo.last_success"));
+
+    deleteLastSuccess("foo", dir);
+    assert.equal(readLastSuccess("foo", dir), null);
+  });
+
+  it("readLastSuccess returns null for unparseable contents", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-state-"));
+    writeFileSync(join(dir, "bad.last_success"), "not-a-date\n");
+    assert.equal(readLastSuccess("bad", dir), null);
   });
 });
 

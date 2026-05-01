@@ -80,6 +80,25 @@ MAX_TURNS=$(get_field max_turns)
 NOTIFY=$(get_field notify)
 RUN_ONCE=$(get_field run_once)
 
+# Idempotency gate: ask dispatch whether this slot has already been served
+# successfully (so RunAtLoad on routine logins doesn't re-fire after each one).
+# Bypassed when DISPATCH_SCHEDULE_FORCE=1 (used by `dispatch schedule run`).
+if [ "${DISPATCH_SCHEDULE_FORCE:-}" != "1" ]; then
+  if command -v dispatch >/dev/null 2>&1; then
+    GATE_OUT=$(dispatch _schedule-should-fire "$NAME" 2>&1)
+    GATE_RC=$?
+    echo "$GATE_OUT"
+    if [ "$GATE_RC" -eq 10 ]; then
+      echo "=== Skipped (gate said this slot already fired) ==="
+      exit 0
+    elif [ "$GATE_RC" -ne 0 ]; then
+      echo "WARN: gate returned $GATE_RC — proceeding anyway"
+    fi
+  else
+    echo "WARN: dispatch not on PATH at gate-check; proceeding without idempotency check"
+  fi
+fi
+
 if [ -n "$REPO" ]; then
   if ! cd "$REPO"; then
     echo "ERROR: cannot cd into repo: $REPO" >&2
@@ -122,6 +141,13 @@ else
 fi
 
 echo "=== Completed with rc=$RC ==="
+
+# Record this slot as "served" so the gate skips on routine RunAtLoad triggers.
+# Only on rc=0 — a failed fire should trigger again on the next RunAtLoad/cron
+# fire so the user has a chance to recover.
+if [ "$RC" -eq 0 ] && command -v dispatch >/dev/null 2>&1; then
+  dispatch _schedule-record-success "$NAME" || echo "WARN: failed to record last_success"
+fi
 
 # v1 notification: log a line. Slack send is not yet wired up — there's no
 # clean send-only helper in cursor-crm/scripts (only slack_dump.py for reads).

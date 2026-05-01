@@ -7,20 +7,25 @@ import {
   buildPlistXml,
   cronToLaunchdIntervals,
   dateToLaunchdInterval,
+  deleteLastSuccess,
   deleteScheduleMeta,
   ensureMacOS,
   findWrapperScript,
   launchctlIsLoaded,
   launchctlLoad,
   launchctlUnload,
+  lastSuccessPath,
   listSchedules,
   metaPath,
   nextCronFire,
   plistLabel,
   plistPath,
+  prevCronFire,
+  readLastSuccess,
   readScheduleMeta,
   SCHEDULE_LOG_DIR,
   SCHEDULE_META_DIR,
+  writeLastSuccess,
   writeScheduleMeta,
   type ScheduleMeta,
 } from "./schedule.js";
@@ -2080,8 +2085,11 @@ function scheduleRunNow(name: string): void {
   readScheduleMeta(name);
   const wrapper = findWrapperScript();
   ensureWrapperExecutable(wrapper);
-  log.info(`Running schedule "${name}" now (foreground)...`);
-  const r = spawnSync("/bin/bash", [wrapper, name], { stdio: "inherit" });
+  log.info(`Running schedule "${name}" now (foreground, bypassing gate)...`);
+  const r = spawnSync("/bin/bash", [wrapper, name], {
+    stdio: "inherit",
+    env: { ...process.env, DISPATCH_SCHEDULE_FORCE: "1" },
+  });
   if (r.status !== 0) {
     log.warn(`Wrapper exited with status ${r.status}`);
     process.exit(r.status ?? 1);
@@ -2130,7 +2138,104 @@ function scheduleRemove(name: string): void {
     unlinkSync(plist);
   }
   deleteScheduleMeta(name);
+  deleteLastSuccess(name);
   log.ok(`Removed schedule: ${name}`);
+}
+
+/** Decide whether the wrapper should actually fire `name` right now. Used by
+ *  the wrapper as a gate so RunAtLoad doesn't double-fire on every login.
+ *
+ *  Exit 0 = fire. Exit 10 = skip (already fired this slot, or one-off too
+ *  early). Other non-zero = real error.
+ *
+ *  For run_once schedules: skip if `now < run_at` (RunAtLoad triggered before
+ *  the moment came), fire otherwise.
+ *
+ *  For cron schedules: compute the most recent `prev_fire` slot. If
+ *  `last_success_at >= prev_fire`, the current slot has already been served;
+ *  skip. Otherwise fire (catch-up after sleep/shutdown, or first-ever run).
+ */
+export function cmdScheduleShouldFire(args: string[]): void {
+  const name = args[0];
+  if (!name) {
+    log.error("Usage: dispatch _schedule-should-fire <name>");
+    process.exit(2);
+  }
+
+  let meta: ScheduleMeta;
+  try {
+    meta = readScheduleMeta(name);
+  } catch (err) {
+    log.error((err as Error).message);
+    process.exit(2);
+  }
+
+  const now = new Date();
+
+  if (meta.run_once) {
+    if (!meta.run_at) {
+      console.log("fire: one-off without run_at — firing");
+      process.exit(0);
+    }
+    const runAt = new Date(meta.run_at);
+    if (Number.isNaN(runAt.getTime())) {
+      console.log("fire: unparseable run_at — firing");
+      process.exit(0);
+    }
+    if (now.getTime() < runAt.getTime()) {
+      console.log(`skip: too early — run_at=${meta.run_at}, now=${now.toISOString()}`);
+      process.exit(10);
+    }
+    console.log(`fire: one-off run_at=${meta.run_at} reached`);
+    process.exit(0);
+  }
+
+  if (!meta.cron) {
+    log.error(`Schedule "${name}" has neither cron nor run_once set`);
+    process.exit(2);
+  }
+
+  const prevFire = prevCronFire(meta.cron, now);
+  const lastSuccess = readLastSuccess(name);
+
+  if (!prevFire) {
+    // No prior slot found within a year — unsatisfiable. Don't fire.
+    console.log("skip: no recent cron slot found");
+    process.exit(10);
+  }
+
+  if (!lastSuccess) {
+    console.log(`fire: no last_success on file (prev slot ${prevFire.toISOString()})`);
+    process.exit(0);
+  }
+
+  if (lastSuccess.getTime() >= prevFire.getTime()) {
+    console.log(
+      `skip: last_success=${lastSuccess.toISOString()} already covers prev_fire=${prevFire.toISOString()}`,
+    );
+    process.exit(10);
+  }
+
+  console.log(
+    `fire: last_success=${lastSuccess.toISOString()} is older than prev_fire=${prevFire.toISOString()}`,
+  );
+  process.exit(0);
+}
+
+/** Record a successful fire. Called by the wrapper after work completes rc=0. */
+export function cmdScheduleRecordSuccess(args: string[]): void {
+  const name = args[0];
+  if (!name) {
+    log.error("Usage: dispatch _schedule-record-success <name>");
+    process.exit(2);
+  }
+  // Only record if the schedule still exists (run_once self-removes pre-work,
+  // so we'd be writing a state file for a deleted schedule otherwise).
+  if (!existsSync(metaPath(name))) {
+    return;
+  }
+  writeLastSuccess(name);
+  console.log(`Recorded last_success for ${name} at ${lastSuccessPath(name)}`);
 }
 
 export function cmdSchedule(args: string[]): void {
