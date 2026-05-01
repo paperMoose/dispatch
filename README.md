@@ -223,6 +223,20 @@ dispatch schedule run <name>           # bypasses gate; preferred
 DISPATCH_SCHEDULE_FORCE=1 ./scripts/dispatch-cron-wrapper.sh <name>   # raw equivalent
 ```
 
+### Wake / boot settle delay
+
+When the wrapper fires within a short window of a system wake (or fresh boot — `kern.waketime` covers both), it sleeps **5 minutes** before invoking work. This gives the network, VPN, gcloud auth refresh, secret-agent unlock, and so on time to finish reconnecting before the agent tries to use them.
+
+Tunables (env vars set on the wrapper, or via `launchctl setenv` for the user session):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `DISPATCH_SCHEDULE_WAKE_WINDOW` | `60` | Seconds since wake/boot that count as "wake-triggered". |
+| `DISPATCH_SCHEDULE_WAKE_DELAY` | `300` | Seconds to sleep when wake-triggered. |
+| `DISPATCH_SCHEDULE_NO_DELAY=1` | unset | Skip the delay even if wake-triggered. |
+
+`dispatch schedule run <name>` (manual) and `DISPATCH_SCHEDULE_FORCE=1` also skip the delay — when you fire on purpose, you don't want to wait.
+
 ### Notifications
 
 `--notify slack` currently writes a marker line to the per-fire log. There is no clean send-only Slack helper in this repo yet — the prompt itself is responsible for posting to Slack via the agent's own tool use. This is a v1 limitation; a real `--notify slack` wired to a CLI helper will land in a follow-up.
