@@ -237,6 +237,31 @@ Tunables (env vars set on the wrapper, or via `launchctl setenv` for the user se
 
 `dispatch schedule run <name>` (manual) and `DISPATCH_SCHEDULE_FORCE=1` also skip the delay — when you fire on purpose, you don't want to wait.
 
+### Live wake-test
+
+`scripts/test-wake.sh` is a two-phase integration test that proves the wake/sleep + idempotency path on a real Mac. Putting the Mac to sleep terminates the test shell, so it splits into setup and verify:
+
+```bash
+# 1. Register a 1-min probe schedule + capture 90s baseline
+./scripts/test-wake.sh setup
+
+# 2. Sleep the Mac
+pmset sleepnow      # or close the lid
+
+# 3. Wait at least 3 minutes, then wake / open the lid
+
+# 4. Verify
+./scripts/test-wake.sh verify
+```
+
+Verify reads `kern.waketime`, parses the probe log, and asserts:
+- `≥1` fire happened pre-sleep (baseline)
+- `0` fires happened during sleep
+- `≥1` fire happened post-wake
+- The first post-wake fire respected the configured `WAKE_DELAY` (within `[delay − 10s, delay + 90s]` to allow for cron-slot alignment slack)
+
+The script uses `WAKE_WINDOW=300s` and `WAKE_DELAY=15s` (set via `launchctl setenv`) so a single test cycle takes ~4 minutes instead of 5+. State + env are torn down at the end of `verify`. Override the baseline length with `TEST_WAKE_BASELINE_SECS=N`.
+
 ### Notifications
 
 `--notify slack` currently writes a marker line to the per-fire log. There is no clean send-only Slack helper in this repo yet — the prompt itself is responsible for posting to Slack via the agent's own tool use. This is a v1 limitation; a real `--notify slack` wired to a CLI helper will land in a follow-up.
