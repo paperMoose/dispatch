@@ -20,6 +20,7 @@ import {
   cmdSetup,
   cmdHistory,
   cmdStatus,
+  cmdSchedule,
 } from "./commands.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -50,6 +51,7 @@ Commands:
   dispatch history [N]                     Show past agent runs (default: last 20)
   dispatch find <query>                    Search across all agent terminal content
   dispatch attach [id]                     Open tmux session (or jump to specific agent)
+  dispatch schedule <sub>                  Manage scheduled runs (launchd, macOS only)
   dispatch setup                           Add dispatch docs to ~/.claude/CLAUDE.md
 
 Run Options:
@@ -147,6 +149,9 @@ async function main(): Promise<void> {
       break;
     case "setup":
       cmdSetup();
+      break;
+    case "schedule":
+      cmdSchedule(rest);
       break;
     case "status":
       cmdStatus(rest, config);
