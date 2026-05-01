@@ -133,11 +133,19 @@ export function cronToLaunchdIntervals(cron: string): LaunchdInterval[] {
   // launchd dict (omitted keys = wildcard). For step expressions like "*/2",
   // the field is NOT a wildcard — we must enumerate the matching values.
   const isWild = (spec: string): boolean => spec === "*";
-  const wildMin = isWild(minSpec);
+  let wildMin = isWild(minSpec);
   const wildHour = isWild(hourSpec);
   const wildDay = isWild(domSpec);
   const wildMonth = isWild(monSpec);
   const wildDow = isWild(dowSpec);
+
+  // Guard against shipping a launchd dict with zero keys. If every field is
+  // wildcard ("* * * * *" — every minute), enumerate Minute explicitly so the
+  // plist contains real constraints. Empty <dict/> is undocumented territory
+  // in launchd; relying on it is fragile across macOS versions.
+  if (wildMin && wildHour && wildDay && wildMonth && wildDow) {
+    wildMin = false;
+  }
 
   const intervals: LaunchdInterval[] = [];
   const minSet: (number | undefined)[] = wildMin ? [undefined] : minutes;
@@ -448,7 +456,10 @@ export function launchctlLoad(plist: string, runner: LaunchctlRunner = realLaunc
 export function launchctlUnload(plist: string, runner: LaunchctlRunner = realLaunchctl): void {
   const r = runner(["unload", "-w", plist]);
   if (r.status !== 0 && !/Could not find/i.test(r.stderr)) {
-    // Don't hard-fail on unload errors — caller is usually deleting anyway.
+    // Don't hard-fail — caller is usually deleting anyway — but surface the
+    // error so the user has a chance to spot misconfiguration.
+    const msg = (r.stderr || r.stdout || "").trim();
+    if (msg) console.error(`\x1b[0;33m⚠\x1b[0m launchctl unload reported: ${msg}`);
   }
 }
 

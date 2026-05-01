@@ -1798,7 +1798,7 @@ function ensureScheduleDirs(): void {
   }
 }
 
-interface ScheduleAddArgs {
+export interface ScheduleAddArgs {
   name: string;
   cron?: string;
   at?: string;
@@ -1811,7 +1811,7 @@ interface ScheduleAddArgs {
   notify?: string;
 }
 
-function parseScheduleAddArgs(args: string[]): ScheduleAddArgs {
+export function parseScheduleAddArgs(args: string[]): ScheduleAddArgs {
   const positional: string[] = [];
   const out: ScheduleAddArgs = { name: "" };
   let i = 0;
@@ -1856,34 +1856,50 @@ function parseScheduleAddArgs(args: string[]): ScheduleAddArgs {
 }
 
 function ensureWrapperExecutable(path: string): void {
-  try {
-    const s = statSync(path);
-    if ((s.mode & 0o111) === 0) {
-      spawnSync("chmod", ["+x", path]);
+  // statSync throws if the wrapper is missing — let it propagate. A missing
+  // wrapper would otherwise cause silent launchd failures on every fire.
+  const s = statSync(path);
+  if ((s.mode & 0o111) === 0) {
+    const r = spawnSync("chmod", ["+x", path]);
+    if (r.status !== 0) {
+      throw new Error(`chmod +x ${path} failed (status ${r.status})`);
     }
-  } catch {
-    // ignore — caller will surface a more useful error if invocation fails
   }
+}
+
+/** Manually expand a leading "~" — shells normally do this before args reach
+ *  us, but quoted paths slip through unexpanded. Apply uniformly to any
+ *  user-supplied path arg.
+ */
+function expandUserPath(p: string): string {
+  if (p.startsWith("~/") || p === "~") {
+    return resolve(p.replace(/^~/, homedir()));
+  }
+  return resolve(p);
 }
 
 function scheduleAdd(args: string[]): void {
   ensureMacOS();
   const parsed = parseScheduleAddArgs(args);
-  ensureScheduleDirs();
 
-  // Resolve absolute prompt path so launchd can find it regardless of cwd
-  const promptFile = parsed.promptFile ? resolve(parsed.promptFile) : undefined;
+  // ----- Validate everything BEFORE writing any state -----
+
+  // Wrapper must exist and be executable before we register a schedule that
+  // depends on it. Failing here is much friendlier than silent launchd errors
+  // on every fire.
+  const wrapper = findWrapperScript();
+  ensureWrapperExecutable(wrapper);
+
+  const promptFile = parsed.promptFile ? expandUserPath(parsed.promptFile) : undefined;
   if (promptFile && !existsSync(promptFile)) {
-    log.error(`Prompt file not found: ${promptFile}`);
-    process.exit(1);
+    throw new Error(`Prompt file not found: ${promptFile}`);
   }
-  const repo = parsed.repo ? resolve(parsed.repo.replace(/^~/, homedir())) : undefined;
+  const repo = parsed.repo ? expandUserPath(parsed.repo) : undefined;
   if (repo && !existsSync(repo)) {
-    log.error(`Repo path not found: ${repo}`);
-    process.exit(1);
+    throw new Error(`Repo path not found: ${repo}`);
   }
 
-  // Build calendar intervals
+  // Build calendar intervals (may throw on bad cron / past --at)
   let intervals;
   let cron: string | undefined;
   let runOnce = false;
@@ -1899,11 +1915,21 @@ function scheduleAdd(args: string[]): void {
   }
 
   // Refuse to overwrite an existing schedule silently
-  const existing = metaPath(parsed.name);
-  if (existsSync(existing)) {
-    log.error(`Schedule "${parsed.name}" already exists. Remove it first: dispatch schedule remove ${parsed.name}`);
-    process.exit(1);
+  if (existsSync(metaPath(parsed.name))) {
+    throw new Error(
+      `Schedule "${parsed.name}" already exists. Remove it first: dispatch schedule remove ${parsed.name}`,
+    );
   }
+  const plist = plistPath(parsed.name);
+  if (existsSync(plist)) {
+    throw new Error(
+      `Plist already exists at ${plist}. Remove it first: dispatch schedule remove ${parsed.name}`,
+    );
+  }
+
+  // Build the plist content before writing anything (catches any
+  // generation errors while we still have nothing on disk).
+  const plistXml = buildPlistXml({ name: parsed.name, intervals, wrapperPath: wrapper });
 
   const meta: ScheduleMeta = {
     name: parsed.name,
@@ -1919,21 +1945,27 @@ function scheduleAdd(args: string[]): void {
     notify: parsed.notify,
     created_at: new Date().toISOString(),
   };
-  writeScheduleMeta(meta);
 
-  const wrapper = findWrapperScript();
-  ensureWrapperExecutable(wrapper);
-  const plistXml = buildPlistXml({ name: parsed.name, intervals, wrapperPath: wrapper });
-  const plist = plistPath(parsed.name);
+  // ----- Now write state. Roll back on any failure. -----
+  ensureScheduleDirs();
   if (!existsSync(dirname(plist))) mkdirSync(dirname(plist), { recursive: true });
-  writeFileSync(plist, plistXml);
 
+  let metaWritten = false;
+  let plistWritten = false;
   try {
+    writeScheduleMeta(meta);
+    metaWritten = true;
+    writeFileSync(plist, plistXml);
+    plistWritten = true;
     launchctlLoad(plist);
   } catch (err) {
-    log.error((err as Error).message);
-    log.warn("Plist + metadata were written, but launchctl load failed. Try: dispatch schedule enable " + parsed.name);
-    process.exit(1);
+    if (plistWritten) {
+      try { unlinkSync(plist); } catch {}
+    }
+    if (metaWritten) {
+      try { deleteScheduleMeta(parsed.name); } catch {}
+    }
+    throw new Error(`Failed to register schedule: ${(err as Error).message}`);
   }
 
   log.ok(`Scheduled ${fmt.BOLD}${parsed.name}${fmt.NC}`);

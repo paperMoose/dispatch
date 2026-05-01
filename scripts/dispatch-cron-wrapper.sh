@@ -88,6 +88,19 @@ if [ -n "$REPO" ]; then
   echo "Working dir: $REPO"
 fi
 
+# For run-once schedules, unload + delete the plist BEFORE invoking the work.
+# launchd's StartCalendarInterval has no year field, so a stranded one-off
+# plist would fire annually on the same date. Doing cleanup up-front means a
+# crashed/killed wrapper still leaves no orphan. The metadata file is kept
+# until after the work completes so a retry by hand still has something to
+# read; we delete it in the post-work cleanup below.
+if [ "$RUN_ONCE" = "true" ]; then
+  PLIST="$HOME/Library/LaunchAgents/com.dispatch.$NAME.plist"
+  echo "=== Run-once: unloading and removing $PLIST (pre-work) ==="
+  launchctl unload -w "$PLIST" 2>/dev/null || true
+  rm -f "$PLIST"
+fi
+
 RC=0
 if [ -n "$COMMAND_FIELD" ]; then
   echo "=== Running command: $COMMAND_FIELD ==="
@@ -117,12 +130,10 @@ if [ "$NOTIFY" = "slack" ]; then
   echo "NOTIFY: schedule '$NAME' fired (rc=$RC). [TODO: post to Slack]"
 fi
 
-# Self-removal for one-off schedules
+# Final cleanup of run-once metadata. The plist was already removed pre-work;
+# the metadata stays until here so any in-flight tooling can still read it.
 if [ "$RUN_ONCE" = "true" ]; then
-  PLIST="$HOME/Library/LaunchAgents/com.dispatch.$NAME.plist"
-  echo "=== Run-once: unloading and removing $PLIST ==="
-  launchctl unload -w "$PLIST" 2>/dev/null || true
-  rm -f "$PLIST"
+  echo "=== Run-once: removing metadata $META_FILE ==="
   rm -f "$META_FILE"
 fi
 

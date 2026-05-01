@@ -108,6 +108,17 @@ describe("cronToLaunchdIntervals", () => {
     assert.deepEqual(out, [{ Minute: 30, Hour: 14 }]);
   });
 
+  it("translates '* * * * *' to 60 Minute-only dicts (no empty dict)", () => {
+    const out = cronToLaunchdIntervals("* * * * *");
+    assert.equal(out.length, 60);
+    // Every interval should have exactly one key (Minute), no empty dicts
+    for (const i of out) {
+      assert.deepEqual(Object.keys(i), ["Minute"]);
+    }
+    assert.equal(out[0].Minute, 0);
+    assert.equal(out[59].Minute, 59);
+  });
+
   it("rejects fewer than 5 fields", () => {
     assert.throws(() => cronToLaunchdIntervals("0 9 * *"));
   });
