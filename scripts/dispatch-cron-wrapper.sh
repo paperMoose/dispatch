@@ -99,6 +99,40 @@ if [ "${DISPATCH_SCHEDULE_FORCE:-}" != "1" ]; then
   fi
 fi
 
+# Wake/boot settle delay: if we're firing very shortly after a system wake
+# (or fresh boot — kern.waketime is updated for both), sleep before doing
+# work so the network, VPN, gcloud auth, etc. have time to come back up.
+#
+# Tunables (env vars):
+#   DISPATCH_SCHEDULE_WAKE_WINDOW   — seconds since wake that count as
+#                                     "wake-triggered" (default: 60)
+#   DISPATCH_SCHEDULE_WAKE_DELAY    — seconds to sleep when wake-triggered
+#                                     (default: 300 = 5 minutes)
+#   DISPATCH_SCHEDULE_NO_DELAY=1    — skip the delay even if wake-triggered
+#
+# DISPATCH_SCHEDULE_FORCE=1 (manual `dispatch schedule run`) also skips it —
+# you're firing on purpose and don't want to wait 5 minutes.
+if [ "${DISPATCH_SCHEDULE_FORCE:-}" != "1" ] && [ "${DISPATCH_SCHEDULE_NO_DELAY:-}" != "1" ]; then
+  WAKE_WINDOW="${DISPATCH_SCHEDULE_WAKE_WINDOW:-60}"
+  WAKE_DELAY="${DISPATCH_SCHEDULE_WAKE_DELAY:-300}"
+  # `sysctl -n kern.waketime` prints "{ sec = N, usec = M } <date>".
+  # Greedy regexes match the trailing usec; pull the second field after `{`.
+  WAKE_SEC=$(sysctl -n kern.waketime 2>/dev/null | awk -F '[= ,]+' '{
+    for (i = 1; i < NF; i++) if ($i == "sec") { print $(i+1); exit }
+  }')
+  if [[ "$WAKE_SEC" =~ ^[0-9]+$ ]]; then
+    NOW_SEC=$(date +%s)
+    AGE=$((NOW_SEC - WAKE_SEC))
+    if [ "$AGE" -ge 0 ] && [ "$AGE" -lt "$WAKE_WINDOW" ]; then
+      echo "=== System woke ${AGE}s ago (< ${WAKE_WINDOW}s window); sleeping ${WAKE_DELAY}s before work ==="
+      sleep "$WAKE_DELAY"
+      echo "=== Settle delay complete @ $(date) ==="
+    else
+      echo "Wake age: ${AGE}s (outside settle window — no delay)"
+    fi
+  fi
+fi
+
 if [ -n "$REPO" ]; then
   if ! cd "$REPO"; then
     echo "ERROR: cannot cd into repo: $REPO" >&2
