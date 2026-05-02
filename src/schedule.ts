@@ -307,10 +307,14 @@ export interface PlistOptions {
   intervals: LaunchdInterval[];
   wrapperPath: string;
   logDir?: string;
+  /** Absolute path to the dispatch CLI binary. Baked into the plist's
+   *  EnvironmentVariables so the wrapper can find dispatch even when launchd
+   *  spawns it without nvm/node-version-manager paths in PATH. */
+  dispatchBin?: string;
 }
 
 export function buildPlistXml(opts: PlistOptions): string {
-  const { name, intervals, wrapperPath } = opts;
+  const { name, intervals, wrapperPath, dispatchBin } = opts;
   const logDir = opts.logDir ?? SCHEDULE_LOG_DIR;
   if (intervals.length === 0) {
     throw new Error("Cannot build plist: no calendar intervals");
@@ -320,6 +324,15 @@ export function buildPlistXml(opts: PlistOptions): string {
     intervals.length === 1
       ? intervalDictXml(intervals[0], "        ")
       : `        <array>\n${intervals.map((i) => intervalDictXml(i, "            ")).join("\n")}\n        </array>`;
+
+  const envBlock = dispatchBin
+    ? `    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DISPATCH_BIN</key>
+        <string>${escapeXml(dispatchBin)}</string>
+    </dict>
+`
+    : "";
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -333,7 +346,7 @@ export function buildPlistXml(opts: PlistOptions): string {
         <string>${escapeXml(wrapperPath)}</string>
         <string>${escapeXml(name)}</string>
     </array>
-    <key>StartCalendarInterval</key>
+${envBlock}    <key>StartCalendarInterval</key>
 ${intervalsBlock}
     <key>RunAtLoad</key>
     <true/>
@@ -354,7 +367,14 @@ export interface ScheduleMeta {
   cron?: string;
   run_once?: boolean;
   run_at?: string;
+  /** @deprecated Path-based prompts depend on a file that may not exist when
+   *  the schedule fires (e.g. user installed via `npm i -g dispatch` and the
+   *  source file was removed). Kept for backward compat with old schedules;
+   *  new ones inline the prompt as `prompt_b64`. */
   prompt_file?: string;
+  /** Base64-encoded prompt content. Inlined at schedule-add time so the
+   *  schedule is self-contained and survives without the originating file. */
+  prompt_b64?: string;
   command?: string;
   branch_prefix?: string;
   model?: string;
@@ -370,6 +390,7 @@ const META_FIELDS: (keyof ScheduleMeta)[] = [
   "run_once",
   "run_at",
   "prompt_file",
+  "prompt_b64",
   "command",
   "branch_prefix",
   "model",
@@ -434,6 +455,16 @@ export function writeScheduleMeta(meta: ScheduleMeta, baseDir = SCHEDULE_META_DI
   const path = metaPath(meta.name, baseDir);
   writeFileSync(path, serializeScheduleMeta(meta));
   return path;
+}
+
+/** Encode prompt text for inline storage. Base64 keeps it on a single YAML
+ *  line so the wrapper's grep-based parser works without a real YAML lib. */
+export function encodePromptText(text: string): string {
+  return Buffer.from(text, "utf-8").toString("base64");
+}
+
+export function decodePromptText(b64: string): string {
+  return Buffer.from(b64, "base64").toString("utf-8");
 }
 
 export function listSchedules(baseDir = SCHEDULE_META_DIR): ScheduleMeta[] {

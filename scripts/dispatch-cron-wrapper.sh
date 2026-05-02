@@ -55,6 +55,17 @@ esac
 if [ -n "${EXTRA_PATH:-}" ]; then
   export PATH="$EXTRA_PATH"
 fi
+# DISPATCH_BIN is set in the plist's EnvironmentVariables at registration
+# time (absolute path of the user's `dispatch` CLI). Use it when present so
+# we don't depend on PATH discovering nvm/asdf/etc. installations from
+# launchd's clean env. Fall back to PATH lookup otherwise.
+if [ -n "${DISPATCH_BIN:-}" ] && [ -x "$DISPATCH_BIN" ]; then
+  # Make a `dispatch` shim function so the rest of the script reads the
+  # same way as the foreground (`schedule run`) path.
+  dispatch() { "$DISPATCH_BIN" "$@"; }
+  export -f dispatch
+  echo "DISPATCH_BIN: $DISPATCH_BIN"
+fi
 echo "PATH: $PATH"
 
 # Tiny YAML field extractor — pulls a single top-level "key: value" line and
@@ -72,6 +83,7 @@ get_field() {
 }
 
 PROMPT_FILE=$(get_field prompt_file)
+PROMPT_B64=$(get_field prompt_b64)
 COMMAND_FIELD=$(get_field command)
 BRANCH_PREFIX=$(get_field branch_prefix)
 MODEL=$(get_field model)
@@ -79,6 +91,20 @@ REPO=$(get_field repo)
 MAX_TURNS=$(get_field max_turns)
 NOTIFY=$(get_field notify)
 RUN_ONCE=$(get_field run_once)
+
+# Inline prompts (prompt_b64) decode to a temp file. This makes schedules
+# self-contained — works for users who installed dispatch via npm and have
+# no source repo on disk. Legacy prompt_file path is still honored.
+INLINE_PROMPT_PATH=""
+if [ -n "$PROMPT_B64" ]; then
+  INLINE_PROMPT_PATH="$LOG_DIR/$NAME-$TS.prompt.txt"
+  if ! printf '%s' "$PROMPT_B64" | base64 -d > "$INLINE_PROMPT_PATH" 2>/dev/null; then
+    echo "ERROR: failed to decode inlined prompt_b64" >&2
+    exit 1
+  fi
+  PROMPT_FILE="$INLINE_PROMPT_PATH"
+  echo "Decoded inlined prompt → $PROMPT_FILE"
+fi
 
 # Idempotency gate: ask dispatch whether this slot has already been served
 # successfully (so RunAtLoad on routine logins doesn't re-fire after each one).
@@ -141,38 +167,187 @@ if [ -n "$REPO" ]; then
   echo "Working dir: $REPO"
 fi
 
-# For run-once schedules, unload + delete the plist BEFORE invoking the work.
-# launchd's StartCalendarInterval has no year field, so a stranded one-off
-# plist would fire annually on the same date. Doing cleanup up-front means a
-# crashed/killed wrapper still leaves no orphan. The metadata file is kept
-# until after the work completes so a retry by hand still has something to
-# read; we delete it in the post-work cleanup below.
+# For run-once schedules we need to remove the plist so it doesn't fire again
+# next year (StartCalendarInterval has no year field). HOWEVER: when this
+# wrapper is invoked by real launchd (the production path), running
+# `launchctl unload` against the plist that started us causes launchd to
+# SIGTERM the wrapper itself before the work runs.
+#
+# Two-phase cleanup:
+#  - PRE-work: just `rm -f` the plist file. Removing the file does NOT signal
+#    launchd; the in-memory job keeps running normally. If the wrapper
+#    crashes after this, the next `launchctl load` (e.g. on reboot) finds no
+#    file and the job is gone — no annual re-fire.
+#  - POST-work: `launchctl unload -w` to clear the in-memory job. By then
+#    the work is done; getting SIGTERM'd here is harmless (we're about to
+#    exit anyway) but `unload` of an already-removed plist is also fine.
 if [ "$RUN_ONCE" = "true" ]; then
   PLIST="$HOME/Library/LaunchAgents/com.dispatch.$NAME.plist"
-  echo "=== Run-once: unloading and removing $PLIST (pre-work) ==="
-  launchctl unload -w "$PLIST" 2>/dev/null || true
+  echo "=== Run-once: removing $PLIST file (pre-work) ==="
   rm -f "$PLIST"
 fi
 
-RC=0
+# Build the work command (one of: raw command, or `dispatch run ...`).
+# Use printf %q for any field that came from user input (model, branch prefix)
+# so shell metacharacters can't break the quoted command we hand to cmux/tmux.
+WORK_CMD=""
 if [ -n "$COMMAND_FIELD" ]; then
-  echo "=== Running command: $COMMAND_FIELD ==="
-  bash -c "$COMMAND_FIELD" || RC=$?
+  WORK_CMD="$COMMAND_FIELD"
 elif [ -n "$PROMPT_FILE" ]; then
   if [ ! -f "$PROMPT_FILE" ]; then
     echo "ERROR: prompt file not found: $PROMPT_FILE" >&2
     exit 1
   fi
   BRANCH_NAME="${BRANCH_PREFIX:-$NAME}-$(date +%Y%m%d-%H%M)"
-  CMD=(dispatch run --headless --no-attach --prompt-file "$PROMPT_FILE" --name "$BRANCH_NAME")
-  if [ -n "$MODEL" ]; then CMD+=(--model "$MODEL"); fi
-  if [ -n "$MAX_TURNS" ]; then CMD+=(--max-turns "$MAX_TURNS"); fi
-  echo "=== Running: ${CMD[*]} ==="
-  "${CMD[@]}" || RC=$?
+  WORK_CMD=$(printf 'dispatch run --headless --no-attach --prompt-file %q --name %q' \
+    "$PROMPT_FILE" "$BRANCH_NAME")
+  if [ -n "$MODEL" ]; then
+    WORK_CMD="$WORK_CMD $(printf '%s %q' --model "$MODEL")"
+  fi
+  if [ -n "$MAX_TURNS" ]; then
+    WORK_CMD="$WORK_CMD $(printf '%s %q' --max-turns "$MAX_TURNS")"
+  fi
 else
-  echo "ERROR: schedule has neither command nor prompt_file set" >&2
+  echo "ERROR: schedule has neither command nor inline prompt set" >&2
   exit 1
 fi
+
+# Discover the shared multiplexer target. We prefer running the work inside an
+# existing cmux pane (or a shared tmux session) so the user has a single
+# observable window for all scheduled fires. `dispatch _scheduled-target`
+# prints one of:
+#   cmux <socket-path> <workspace-id>
+#   tmux <session-name>
+#   none
+TARGET_OUT=""
+if command -v dispatch >/dev/null 2>&1; then
+  TARGET_OUT=$(dispatch _scheduled-target 2>/dev/null || true)
+fi
+TARGET_KIND=$(printf '%s' "$TARGET_OUT" | awk '{print $1}')
+
+# When we route work into a shared multiplexer pane, we lose the synchronous
+# rc that we get from inline `bash -c "$WORK_CMD"`. To preserve real success
+# accounting (so `_schedule-record-success` doesn't lie to the idempotency
+# gate), we use a done-marker pattern: the work command appends `; echo $? > MARKER`
+# and we poll for the marker, treating its contents as the real rc.
+#
+# Timeout is generous — `dispatch run --headless` exits within seconds (it
+# only dispatches the agent, doesn't wait for it), but raw `command:` schedules
+# could be longer. Tunable via DISPATCH_SCHEDULE_TARGET_TIMEOUT (seconds).
+DONE_MARKER="$LOG_DIR/$NAME-$TS.done"
+TARGET_TIMEOUT="${DISPATCH_SCHEDULE_TARGET_TIMEOUT:-600}"
+
+# Wrap the work so its rc is captured. We use a subshell `( ... )` so any
+# `exit N` inside the work doesn't kill the cmux pane's shell (which would
+# trigger pane-exited cleanup and close the shared workspace).
+WRAPPED_WORK=$(printf '( %s ); echo $? > %q' "$WORK_CMD" "$DONE_MARKER")
+
+# Poll for the marker. Returns 0 on found, 1 on timeout. Reads RC into the
+# global RC variable on success.
+wait_for_marker() {
+  local elapsed=0
+  local sleep_s=1
+  while [ "$elapsed" -lt "$TARGET_TIMEOUT" ]; do
+    if [ -f "$DONE_MARKER" ]; then
+      local read_rc
+      read_rc=$(cat "$DONE_MARKER" 2>/dev/null | tr -d '[:space:]')
+      if [[ "$read_rc" =~ ^[0-9]+$ ]]; then
+        RC="$read_rc"
+        return 0
+      fi
+      # Marker exists but unreadable — treat as failure rather than success.
+      RC=1
+      return 0
+    fi
+    sleep "$sleep_s"
+    elapsed=$((elapsed + sleep_s))
+  done
+  return 1
+}
+
+RC=0
+case "$TARGET_KIND" in
+  cmux)
+    SOCKET=$(printf '%s' "$TARGET_OUT" | awk -F'\t' '{print $2}')
+    WSID=$(printf '%s' "$TARGET_OUT" | awk -F'\t' '{print $3}')
+    echo "=== Routing into shared cmux workspace $WSID (socket: $SOCKET) ==="
+    CMUX_CLI=$(command -v cmux 2>/dev/null || true)
+    if [ -z "$CMUX_CLI" ]; then
+      for c in "/Applications/cmux NIGHTLY.app/Contents/Resources/bin/cmux" \
+               "/Applications/cmux.app/Contents/Resources/bin/cmux"; do
+        if [ -x "$c" ]; then CMUX_CLI="$c"; break; fi
+      done
+    fi
+    if [ -z "$CMUX_CLI" ]; then
+      echo "WARN: cmux CLI not found; falling back to inline run"
+      bash -c "$WORK_CMD" || RC=$?
+    else
+      SEND_PAYLOAD="echo '--- [scheduled:$NAME @ $(date +%H:%M:%S)] ---' && $WRAPPED_WORK"$'\n'
+      if ! "$CMUX_CLI" --socket "$SOCKET" send --workspace "$WSID" "$SEND_PAYLOAD"; then
+        echo "WARN: cmux send failed; falling back to inline run"
+        bash -c "$WORK_CMD" || RC=$?
+      else
+        echo "Waiting for done-marker $DONE_MARKER (timeout ${TARGET_TIMEOUT}s)..."
+        if ! wait_for_marker; then
+          echo "WARN: timed out waiting for cmux pane to finish — recording as failure"
+          RC=1
+        else
+          echo "Marker received: rc=$RC"
+        fi
+      fi
+    fi
+    ;;
+  tmux)
+    SESSION=$(printf '%s' "$TARGET_OUT" | awk -F'\t' '{print $2}')
+    TMUX_BIN=$(printf '%s' "$TARGET_OUT" | awk -F'\t' '{print $3}')
+    # Fall back to PATH lookup if dispatch didn't supply an absolute path.
+    [ -z "$TMUX_BIN" ] && TMUX_BIN=$(command -v tmux 2>/dev/null || true)
+    WIN_NAME="${NAME}-${TS}"
+    if [ -z "$TMUX_BIN" ]; then
+      echo "WARN: tmux target advertised but binary not found; falling back to inline run"
+      bash -c "$WORK_CMD" || RC=$?
+    else
+      echo "=== Routing into shared tmux session '$SESSION' (window: $WIN_NAME) via $TMUX_BIN ==="
+    # `exec bash` after the marker write keeps the window (and therefore the
+    # session) alive so the user can attach and inspect output. Without it,
+    # the window's process exits when the work finishes and the session
+    # collapses on the last-window-out — fine for accounting (marker already
+    # written) but the user has nothing to attach to.
+    TMUX_INNER=$(printf 'bash -lc %q' "$WRAPPED_WORK; exec bash")
+    SENT=0
+    if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
+      if "$TMUX_BIN" new-session -d -s "$SESSION" -n "$WIN_NAME" "$TMUX_INNER"; then
+        SENT=1
+      fi
+    else
+      if "$TMUX_BIN" new-window -t "$SESSION" -n "$WIN_NAME" "$TMUX_INNER"; then
+        SENT=1
+      fi
+    fi
+    if [ "$SENT" -eq 0 ]; then
+      echo "WARN: tmux dispatch failed; falling back to inline run"
+      bash -c "$WORK_CMD" || RC=$?
+    else
+      echo "Waiting for done-marker $DONE_MARKER (timeout ${TARGET_TIMEOUT}s)..."
+      if ! wait_for_marker; then
+        echo "WARN: timed out waiting for tmux window to finish — recording as failure"
+        RC=1
+      else
+        echo "Marker received: rc=$RC"
+      fi
+    fi
+    fi  # close TMUX_BIN-found branch
+    ;;
+  *)
+    echo "=== No multiplexer available — running inline ==="
+    bash -c "$WORK_CMD" || RC=$?
+    ;;
+esac
+
+# Marker file is single-use; remove it so a future fire with the same TS
+# can't accidentally see a stale "success." The TS already includes seconds
+# so collisions are vanishingly rare, but defensive cleanup is cheap.
+rm -f "$DONE_MARKER" 2>/dev/null || true
 
 echo "=== Completed with rc=$RC ==="
 
@@ -190,11 +365,23 @@ if [ "$NOTIFY" = "slack" ]; then
   echo "NOTIFY: schedule '$NAME' fired (rc=$RC). [TODO: post to Slack]"
 fi
 
-# Final cleanup of run-once metadata. The plist was already removed pre-work;
-# the metadata stays until here so any in-flight tooling can still read it.
+# Final cleanup of run-once metadata. The plist file was already removed
+# pre-work; the metadata stays until here so any in-flight tooling can still
+# read it. Now also unload the in-memory launchd job — done LAST because if
+# launchd SIGTERMs us in response, we're about to exit anyway.
 if [ "$RUN_ONCE" = "true" ]; then
   echo "=== Run-once: removing metadata $META_FILE ==="
   rm -f "$META_FILE"
+  if command -v launchctl >/dev/null 2>&1; then
+    LABEL="com.dispatch.$NAME"
+    echo "=== Run-once: bootout/unload of $LABEL (post-work) ==="
+    # Prefer the modern `bootout` API; fall back to legacy `unload -w` if it
+    # isn't available. Either may SIGTERM us — that's fine, we're done.
+    UID_VAL=$(id -u)
+    launchctl bootout "gui/$UID_VAL/$LABEL" 2>/dev/null \
+      || launchctl unload -w "$HOME/Library/LaunchAgents/$LABEL.plist" 2>/dev/null \
+      || true
+  fi
 fi
 
 exit "$RC"

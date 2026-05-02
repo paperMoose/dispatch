@@ -7,8 +7,10 @@ import {
   buildPlistXml,
   cronToLaunchdIntervals,
   dateToLaunchdInterval,
+  decodePromptText,
   deleteLastSuccess,
   deleteScheduleMeta,
+  encodePromptText,
   ensureMacOS,
   findWrapperScript,
   launchctlIsLoaded,
@@ -61,6 +63,9 @@ import {
   cmuxSendKey,
   cmuxPasteBuffer,
   cmuxSetStatus,
+  ensureCmuxRunning,
+  findRunningCmuxSocket,
+  getOrCreateScheduledCmuxWorkspace,
   cmuxClearStatus,
   cmuxSetProgress,
   cmuxClearProgress,
@@ -1808,6 +1813,7 @@ export interface ScheduleAddArgs {
   cron?: string;
   at?: string;
   promptFile?: string;
+  prompt?: string;
   command?: string;
   branchPrefix?: string;
   model?: string;
@@ -1826,6 +1832,7 @@ export function parseScheduleAddArgs(args: string[]): ScheduleAddArgs {
       case "--cron": out.cron = args[++i]; break;
       case "--at": out.at = args[++i]; break;
       case "--prompt-file": out.promptFile = args[++i]; break;
+      case "--prompt": out.prompt = args[++i]; break;
       case "--command": out.command = args[++i]; break;
       case "--branch-prefix": out.branchPrefix = args[++i]; break;
       case "--model": out.model = args[++i]; break;
@@ -1851,11 +1858,12 @@ export function parseScheduleAddArgs(args: string[]): ScheduleAddArgs {
   if (out.cron && out.at) {
     throw new Error("Cannot use both --cron and --at");
   }
-  if (!out.promptFile && !out.command) {
-    throw new Error("Must provide either --prompt-file or --command");
+  const promptSources = [out.promptFile, out.prompt, out.command].filter(Boolean).length;
+  if (promptSources === 0) {
+    throw new Error("Must provide --prompt-file, --prompt, or --command");
   }
-  if (out.promptFile && out.command) {
-    throw new Error("Cannot use both --prompt-file and --command");
+  if (promptSources > 1) {
+    throw new Error("Use only one of --prompt-file, --prompt, --command");
   }
   return out;
 }
@@ -1895,9 +1903,25 @@ function scheduleAdd(args: string[]): void {
   const wrapper = findWrapperScript();
   ensureWrapperExecutable(wrapper);
 
-  const promptFile = parsed.promptFile ? expandUserPath(parsed.promptFile) : undefined;
-  if (promptFile && !existsSync(promptFile)) {
-    throw new Error(`Prompt file not found: ${promptFile}`);
+  // Inline the prompt text into the schedule meta so the schedule survives
+  // without the originating file. This makes `npm i -g dispatch` + create a
+  // schedule self-contained — no path dependency at fire time.
+  let promptB64: string | undefined;
+  if (parsed.promptFile) {
+    const promptFile = expandUserPath(parsed.promptFile);
+    if (!existsSync(promptFile)) {
+      throw new Error(`Prompt file not found: ${promptFile}`);
+    }
+    const contents = readFileSync(promptFile, "utf-8");
+    if (!contents.trim()) {
+      throw new Error(`Prompt file is empty: ${promptFile}`);
+    }
+    promptB64 = encodePromptText(contents);
+  } else if (parsed.prompt) {
+    if (!parsed.prompt.trim()) {
+      throw new Error("--prompt value is empty");
+    }
+    promptB64 = encodePromptText(parsed.prompt);
   }
   const repo = parsed.repo ? expandUserPath(parsed.repo) : undefined;
   if (repo && !existsSync(repo)) {
@@ -1932,16 +1956,31 @@ function scheduleAdd(args: string[]): void {
     );
   }
 
+  // Capture the absolute path of the dispatch CLI binary (the user-facing
+  // shim, e.g. ~/.nvm/.../bin/dispatch) so the wrapper can invoke it directly
+  // when launchd's clean PATH wouldn't find it. We prefer `which dispatch`
+  // because that's what the user actually invokes; fall back to
+  // process.argv[1] (the dist/cli.js file) if `which` fails.
+  let dispatchBin: string | undefined;
+  const which = spawnSync("which", ["dispatch"], { stdio: "pipe" });
+  if (which.status === 0) {
+    const out = which.stdout.toString().trim();
+    if (out) dispatchBin = out;
+  }
+  if (!dispatchBin && process.argv[1]) {
+    dispatchBin = process.argv[1];
+  }
+
   // Build the plist content before writing anything (catches any
   // generation errors while we still have nothing on disk).
-  const plistXml = buildPlistXml({ name: parsed.name, intervals, wrapperPath: wrapper });
+  const plistXml = buildPlistXml({ name: parsed.name, intervals, wrapperPath: wrapper, dispatchBin });
 
   const meta: ScheduleMeta = {
     name: parsed.name,
     cron,
     run_once: runOnce || undefined,
     run_at: runAt,
-    prompt_file: promptFile,
+    prompt_b64: promptB64,
     command: parsed.command,
     branch_prefix: parsed.branchPrefix,
     model: parsed.model,
@@ -1979,6 +2018,9 @@ function scheduleAdd(args: string[]): void {
   if (cron) log.dim(`  Cron:     ${cron}`);
   if (runAt) log.dim(`  Fires at: ${runAt} (one-off)`);
   log.dim(`  Logs:     ${SCHEDULE_LOG_DIR}/${parsed.name}-*.log`);
+  if (promptB64 && parsed.promptFile) {
+    log.dim(`  Note:     prompt content captured inline; later edits to ${parsed.promptFile} won't affect this schedule.`);
+  }
 }
 
 function scheduleList(): void {
@@ -2045,7 +2087,14 @@ function scheduleShow(name: string): void {
   console.log(`${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`);
   if (meta.cron) console.log(`  cron:          ${meta.cron}`);
   if (meta.run_at) console.log(`  run_at:        ${meta.run_at}  (one-off)`);
-  if (meta.prompt_file) console.log(`  prompt_file:   ${meta.prompt_file}`);
+  if (meta.prompt_file) console.log(`  prompt_file:   ${meta.prompt_file}  ${fmt.DIM}(legacy — file dependency)${fmt.NC}`);
+  if (meta.prompt_b64) {
+    const decoded = decodePromptText(meta.prompt_b64);
+    const preview = decoded.split("\n").slice(0, 3).join("\n").trim();
+    const more = decoded.split("\n").length > 3 ? `\n  ${fmt.DIM}…(${decoded.length} chars total)${fmt.NC}` : "";
+    console.log(`  prompt:        ${fmt.DIM}(inlined, ${decoded.length} chars)${fmt.NC}`);
+    if (preview) console.log(preview.split("\n").map((l) => `    ${fmt.DIM}│${fmt.NC} ${l}`).join("\n") + more);
+  }
   if (meta.command) console.log(`  command:       ${meta.command}`);
   if (meta.branch_prefix) console.log(`  branch_prefix: ${meta.branch_prefix}`);
   if (meta.model) console.log(`  model:         ${meta.model}`);
@@ -2220,6 +2269,69 @@ export function cmdScheduleShouldFire(args: string[]): void {
     `fire: last_success=${lastSuccess.toISOString()} is older than prev_fire=${prevFire.toISOString()}`,
   );
   process.exit(0);
+}
+
+/** Internal: print the shared multiplexer target for the cron wrapper.
+ *  Stdout format (one of):
+ *    cmux <socket-path> <workspace-id>
+ *    tmux <session>:<window-name>
+ *    none
+ *
+ *  When cmux is running, finds-or-creates the shared "Scheduled Dispatch"
+ *  workspace and prints its socket+id. When only tmux is available, prints
+ *  the shared session name (the wrapper creates the window itself with
+ *  `tmux new-window`). Otherwise prints "none" so the wrapper falls back to
+ *  running the work inline.
+ *
+ *  This indirection keeps cmux discovery and workspace-stash logic in TS,
+ *  not duplicated in bash.
+ */
+export function cmdScheduledTarget(_args: string[]): void {
+  // cmux's socket is access-controlled — connections from outside cmux's
+  // process tree fail with "Failed to write to socket". This means:
+  //   - INSIDE cmux (interactive `dispatch schedule run` from a cmux pane):
+  //     CMUX_WORKSPACE_ID is set, we're authorized, cmux integration works.
+  //   - OUTSIDE cmux (launchd fire, or non-cmux terminal): socket calls fail
+  //     even when cmux is running visibly. We fall through to tmux.
+  //
+  // There's an experimental "auto-boot cmux" path (ensureCmuxRunning()) that
+  // calls `cmux <path>` to launch the GUI from outside, hoping our process
+  // tree then includes the new cmux. That works from foreground shells but
+  // is unverified under launchd (macOS may block GUI launches from
+  // background plists). Gated behind DISPATCH_SCHEDULE_AUTOBOOT_CMUX=1 until
+  // we can verify it on a clean session.
+  const insideCmux = !!process.env.CMUX_WORKSPACE_ID;
+  const tryAutoboot = process.env.DISPATCH_SCHEDULE_AUTOBOOT_CMUX === "1";
+  if (insideCmux || tryAutoboot) {
+    const sock = tryAutoboot ? ensureCmuxRunning() : findRunningCmuxSocket();
+    if (sock) {
+      process.env.CMUX_SOCKET_PATH = process.env.CMUX_SOCKET_PATH || sock;
+      const wsId = getOrCreateScheduledCmuxWorkspace();
+      if (wsId) {
+        console.log(`cmux\t${process.env.CMUX_SOCKET_PATH}\t${wsId}`);
+        return;
+      }
+    }
+  }
+  // tmux fallback. Look in PATH first; if not found, probe common install
+  // paths (homebrew on Apple Silicon, Intel mac, /usr/local). launchd's
+  // minimal PATH typically excludes /opt/homebrew/bin.
+  let tmuxBin = "";
+  const inPath = spawnSync("command", ["-v", "tmux"], { shell: true, stdio: "pipe" });
+  if (inPath.status === 0) {
+    tmuxBin = inPath.stdout.toString().trim();
+  } else {
+    for (const candidate of ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]) {
+      if (existsSync(candidate)) { tmuxBin = candidate; break; }
+    }
+  }
+  if (tmuxBin) {
+    // Tab-separated: kind, session-name, absolute tmux binary path. The
+    // wrapper uses the binary path so it doesn't depend on PATH either.
+    console.log(`tmux\tdispatch-scheduled\t${tmuxBin}`);
+    return;
+  }
+  console.log("none");
 }
 
 /** Record a successful fire. Called by the wrapper after work completes rc=0. */

@@ -2,3 +2,5 @@ node_modules/
 dist/
 
 .worktrees/
+
+.dispatch-history.jsonl

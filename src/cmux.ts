@@ -1,5 +1,7 @@
 import { spawnSync } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { dirname, join } from "path";
 
 // ---------------------------------------------------------------------------
 // cmux CLI path detection
@@ -373,9 +375,6 @@ export function cmuxOpenMarkdown(workspaceId: string, filePath: string): boolean
 // ---------------------------------------------------------------------------
 // We store cmux workspace IDs in the worktree so we can map agent ID → workspace.
 
-import { readFileSync, writeFileSync } from "fs";
-import { join } from "path";
-
 const CMUX_ID_FILE = ".dispatch-cmux-workspace";
 
 export function saveCmuxWorkspaceId(wtPath: string, workspaceId: string): void {
@@ -386,4 +385,125 @@ export function loadCmuxWorkspaceId(wtPath: string): string | null {
   const file = join(wtPath, CMUX_ID_FILE);
   if (!existsSync(file)) return null;
   return readFileSync(file, "utf-8").trim();
+}
+
+// ---------------------------------------------------------------------------
+// Out-of-process cmux discovery
+// ---------------------------------------------------------------------------
+// When dispatch is invoked from launchd (the scheduled-fire path), it runs in
+// a clean env with no CMUX_SOCKET_PATH and no CMUX_WORKSPACE_ID. cmux writes
+// the most recently active socket path to /tmp/cmux-last-socket-path on
+// startup; that's our hook for finding a running cmux from outside.
+
+const CMUX_LAST_SOCKET_FILE = "/tmp/cmux-last-socket-path";
+
+/** Try to start the cmux app if it isn't running. Uses `cmux <path>` (which
+ *  cmux's own CLI documents as "launches cmux if needed"). Then polls for
+ *  the socket pointer to appear. Returns the socket path on success, or null
+ *  on timeout / no cmux binary / launch failure. */
+export function ensureCmuxRunning(timeoutMs: number = 8000): string | null {
+  // Already running?
+  const existing = findRunningCmuxSocket();
+  if (existing) return existing;
+
+  const cli = cmuxCliPath();
+  if (!cli) return null;
+
+  // `cmux <path>` boots the app and creates a workspace. We pass HOME so it
+  // opens somewhere reasonable, but we'll rename the workspace right after
+  // anyway. Detached so we don't block on the GUI process.
+  const target = process.env.HOME || "/";
+  const proc = spawnSync(cli, [target], { stdio: "ignore", timeout: 4000 });
+  // spawnSync may exit before the GUI is up; that's fine — we poll below.
+  void proc;
+
+  // Poll for the socket pointer. cmux writes /tmp/cmux-last-socket-path on
+  // startup before the socket is fully accept()ing; findRunningCmuxSocket
+  // also stat()s the socket file to confirm liveness.
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const sock = findRunningCmuxSocket();
+    if (sock) return sock;
+    // 100ms tick. spawnSync sleep is intentional — keeps this synchronous
+    // (cmdScheduledTarget runs synchronously to print + exit cleanly).
+    spawnSync("sleep", ["0.1"]);
+  }
+  return null;
+}
+
+/** Path to the running cmux socket, or null if none is alive.
+ *  Reads cmux's last-socket pointer file and stat()s the resulting socket.
+ *  `pointerPath` override exists for tests. */
+export function findRunningCmuxSocket(pointerPath: string = CMUX_LAST_SOCKET_FILE): string | null {
+  if (!existsSync(pointerPath)) return null;
+  let candidate: string;
+  try {
+    candidate = readFileSync(pointerPath, "utf-8").trim();
+  } catch {
+    return null;
+  }
+  if (!candidate || !existsSync(candidate)) return null;
+  try {
+    const s = statSync(candidate);
+    // socket file: must be a socket (Unix domain). Other types (regular file,
+    // dir) mean stale or wrong path — treat as no cmux.
+    if (!s.isSocket()) return null;
+  } catch {
+    return null;
+  }
+  return candidate;
+}
+
+// ---------------------------------------------------------------------------
+// Shared "Scheduled Dispatch" workspace
+// ---------------------------------------------------------------------------
+// All scheduled fires reuse one workspace so the user has a single observable
+// pane for cron output. The workspace ID is stashed at
+// ~/.dispatch/scheduled-cmux-workspace; if cmux's list no longer contains it
+// (user closed the workspace), we create + restash a fresh one.
+
+const SCHEDULED_WORKSPACE_TITLE = "Scheduled Dispatch";
+
+function scheduledWorkspaceStashPath(): string {
+  return join(homedir(), ".dispatch", "scheduled-cmux-workspace");
+}
+
+function readStashedScheduledWorkspaceId(): string | null {
+  const p = scheduledWorkspaceStashPath();
+  if (!existsSync(p)) return null;
+  try {
+    const id = readFileSync(p, "utf-8").trim();
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStashedScheduledWorkspaceId(id: string): void {
+  const p = scheduledWorkspaceStashPath();
+  if (!existsSync(dirname(p))) mkdirSync(dirname(p), { recursive: true });
+  // Atomic write: temp + rename. If two concurrent cron fires race here,
+  // whoever renames last wins; neither sees a half-written file. The losing
+  // workspace ends up orphaned in cmux but that's recoverable (user can
+  // close it). A torn read would be silently corrupted state — much worse.
+  const tmp = `${p}.${process.pid}.tmp`;
+  writeFileSync(tmp, id + "\n");
+  renameSync(tmp, p);
+}
+
+/** Find or create the shared "Scheduled Dispatch" workspace. Returns its ID,
+ *  or null if cmux is not reachable. Caller is responsible for setting
+ *  CMUX_SOCKET_PATH first if invoking from outside cmux. */
+export function getOrCreateScheduledCmuxWorkspace(): string | null {
+  const stashed = readStashedScheduledWorkspaceId();
+  if (stashed) {
+    const live = parseCmuxWorkspaces();
+    if (live.some((w) => w.ref === stashed)) return stashed;
+    // Stale stash — fall through to recreate.
+  }
+  const fresh = cmuxNewWorkspace();
+  if (!fresh) return null;
+  cmuxRenameWorkspace(fresh, SCHEDULED_WORKSPACE_TITLE);
+  writeStashedScheduledWorkspaceId(fresh);
+  return fresh;
 }

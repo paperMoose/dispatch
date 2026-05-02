@@ -23,6 +23,8 @@ import {
   readScheduleMeta,
   listSchedules,
   deleteScheduleMeta,
+  encodePromptText,
+  decodePromptText,
   type LaunchdInterval,
   type LaunchctlRunner,
   type ScheduleMeta,
@@ -308,6 +310,26 @@ describe("ScheduleMeta YAML roundtrip", () => {
 
   it("rejects metadata without required fields", () => {
     assert.throws(() => parseScheduleMeta("cron: 0 9 * * 5"));
+  });
+
+  it("roundtrips inline prompt_b64 (with newlines and quotes)", () => {
+    const original = `# Heading\n\nLine with "quotes" and 'apostrophes'.\n\n- bullet 1\n- bullet 2\n`;
+    const meta: ScheduleMeta = {
+      name: "inline-prompt",
+      cron: "0 16 * * 5",
+      prompt_b64: encodePromptText(original),
+      created_at: "2026-05-01T19:30:00Z",
+    };
+    const parsed = parseScheduleMeta(serializeScheduleMeta(meta));
+    assert.ok(parsed.prompt_b64);
+    assert.equal(decodePromptText(parsed.prompt_b64!), original);
+  });
+
+  it("encoded prompt is single-line (safe for grep-based YAML parser)", () => {
+    const multiline = "line1\nline2\nline3";
+    const encoded = encodePromptText(multiline);
+    assert.ok(!encoded.includes("\n"), "base64 output must not contain newlines");
+    assert.equal(decodePromptText(encoded), multiline);
   });
 });
 

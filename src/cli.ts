@@ -23,6 +23,7 @@ import {
   cmdSchedule,
   cmdScheduleShouldFire,
   cmdScheduleRecordSuccess,
+  cmdScheduledTarget,
 } from "./commands.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -160,6 +161,9 @@ async function main(): Promise<void> {
       break;
     case "_schedule-record-success":
       cmdScheduleRecordSuccess(rest);
+      break;
+    case "_scheduled-target":
+      cmdScheduledTarget(rest);
       break;
     case "status":
       cmdStatus(rest, config);
