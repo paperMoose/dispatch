@@ -642,6 +642,17 @@ export { getCmuxWorkspaceId };
 // ---------------------------------------------------------------------------
 // Claude readiness
 // ---------------------------------------------------------------------------
+
+/** True when terminal content shows the Claude TUI is rendered and ready for input.
+ *  Markers chosen so they cannot match the typed launch command
+ *  (`unset CLAUDECODE && claude --model …`) — the bare word "claude" is NOT a marker. */
+export function isClaudeReady(content: string): boolean {
+  // Empty prompt indicators on their own line — old (`>`/`?`) and new (`❯`) TUIs.
+  if (/^\s*[>?❯]\s*$/m.test(content)) return true;
+  // Banner / footer / box-drawing fragments unique to the rendered TUI.
+  return /❯|Claude Code v\d|\? for shortcuts|╭─|▐▛|Welcome to Claude/.test(content);
+}
+
 export function waitForClaude(id: string, timeout: number): void {
   if (useCmux()) {
     const wsId = getCmuxWorkspaceId(id);
@@ -651,7 +662,7 @@ export function waitForClaude(id: string, timeout: number): void {
   let waited = 0;
   while (waited < timeout) {
     const content = tmuxCapture(id, 5);
-    if (/^\s*[>?]\s*$/m.test(content) || /╭|Welcome|claude/i.test(content)) {
+    if (isClaudeReady(content)) {
       if (useCmux()) {
         const wsId = getCmuxWorkspaceId(id);
         if (wsId) cmuxSetStatus(wsId, "dispatch", "running", { color: "#44BBA4" });
