@@ -540,6 +540,28 @@ export function launchctlLoad(plist: string, runner: LaunchctlRunner = realLaunc
   }
 }
 
+/** Load a plist AND verify launchd actually registered the job. `launchctl
+ *  load` exits 0 even when the job never loads — a malformed plist, a label
+ *  that's already bootstrapped, or a sandbox refusal all surface as a clean
+ *  exit. Trusting that exit code is exactly how a schedule ends up with a meta
+ *  file + plist on disk but nothing running: the silent "registered but never
+ *  fires" failure. Load, then confirm the label is in `launchctl list`; throw
+ *  if it isn't so the caller can roll back and the user sees a hard error. */
+export function launchctlLoadVerified(
+  plist: string,
+  label: string,
+  runner: LaunchctlRunner = realLaunchctl,
+): void {
+  launchctlLoad(plist, runner);
+  if (!launchctlIsLoaded(label, runner)) {
+    throw new Error(
+      `launchctl load reported success but ${label} is not in 'launchctl list'. ` +
+        `The plist was likely rejected by launchd (malformed, or the label is already bootstrapped). ` +
+        `Inspect: launchctl print gui/$(id -u)/${label}`,
+    );
+  }
+}
+
 export function launchctlUnload(plist: string, runner: LaunchctlRunner = realLaunchctl): void {
   const r = runner(["unload", "-w", plist]);
   if (r.status !== 0 && !/Could not find/i.test(r.stderr)) {

@@ -14,7 +14,7 @@ import {
   ensureMacOS,
   findWrapperScript,
   launchctlIsLoaded,
-  launchctlLoad,
+  launchctlLoadVerified,
   launchctlUnload,
   lastSuccessPath,
   listSchedules,
@@ -1774,7 +1774,10 @@ Add options:
   --model <m>               Claude model (sonnet|opus|haiku)
   --repo <path>             cd into this repo before invoking dispatch run
   --max-turns <n>           Forwarded to dispatch run --max-turns
-  --notify slack|none       Notification channel (v1: just logs a line)
+  --notify none|notification|slack
+                            Visible macOS banner on fire. none=silent (default),
+                            notification=banner every fire, slack=banner + log
+                            line (real Slack send not yet wired)
 
 Examples:
   dispatch schedule add voice-check --cron "0 16 * * 5" \\
@@ -2001,7 +2004,12 @@ function scheduleAdd(args: string[]): void {
     metaWritten = true;
     writeFileSync(plist, plistXml);
     plistWritten = true;
-    launchctlLoad(plist);
+    // Load AND verify the job actually registered. A bare `launchctl load`
+    // exits 0 even when launchd silently rejects the plist, which is how a
+    // schedule ends up with meta + plist on disk but nothing running. On
+    // failure this throws and the rollback below cleans up so we never leave a
+    // half-registered schedule behind.
+    launchctlLoadVerified(plist, plistLabel(parsed.name));
   } catch (err) {
     if (plistWritten) {
       try { unlinkSync(plist); } catch {}
@@ -2156,7 +2164,7 @@ function scheduleEnable(name: string): void {
     log.error(`No plist for "${name}" at ${plist}`);
     process.exit(1);
   }
-  launchctlLoad(plist);
+  launchctlLoadVerified(plist, plistLabel(name));
   log.ok(`Enabled: ${name}`);
 }
 

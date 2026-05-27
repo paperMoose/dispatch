@@ -264,7 +264,13 @@ The script uses `WAKE_WINDOW=300s` and `WAKE_DELAY=15s` (set via `launchctl sete
 
 ### Notifications
 
-`--notify slack` currently writes a marker line to the per-fire log. There is no clean send-only Slack helper in this repo yet — the prompt itself is responsible for posting to Slack via the agent's own tool use. This is a v1 limitation; a real `--notify slack` wired to a CLI helper will land in a follow-up.
+`--notify` controls how a fire surfaces. A scheduled job runs where you can't see it, so a silent failure is invisible until you go digging — `--notify` fixes that:
+
+- `none` (default): no banner. Fully silent. Logs are still written.
+- `notification`: a macOS banner on **every** fire, success or failure (`dispatch ✓ <name>` / `dispatch ✗ <name> failed (rc=N)`). Use this for any job whose outcome you'd want to know about.
+- `slack`: same macOS banner, plus a marker line in the per-fire log. There is no clean send-only Slack helper in this repo yet, so the prompt itself is responsible for posting to Slack via the agent's own tool use. A real `--notify slack` wired to a CLI helper will land in a follow-up.
+
+The banner is fired by the wrapper via `osascript display notification`; launchd LaunchAgents run in the user's GUI session, so it reaches Notification Center.
 
 ### Worked example: voice-reliability-check
 

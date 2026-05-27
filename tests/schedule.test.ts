@@ -10,6 +10,7 @@ import {
   deleteLastSuccess,
   launchctlIsLoaded,
   launchctlLoad,
+  launchctlLoadVerified,
   launchctlUnload,
   lastSuccessPath,
   nextCronFire,
@@ -450,5 +451,31 @@ describe("launchctl wrappers (mocked)", () => {
     });
     assert.equal(launchctlIsLoaded("com.dispatch.weekly-check", runner), true);
     assert.equal(launchctlIsLoaded("com.dispatch.missing", runner), false);
+  });
+
+  it("launchctlLoadVerified succeeds when the label loads", () => {
+    const calls: string[][] = [];
+    const runner: LaunchctlRunner = (args) => {
+      calls.push(args);
+      if (args[0] === "load") return { status: 0, stdout: "", stderr: "" };
+      // args[0] === "list"
+      return { status: 0, stdout: "1\t0\tcom.dispatch.ok\n", stderr: "" };
+    };
+    launchctlLoadVerified("/tmp/ok.plist", "com.dispatch.ok", runner);
+    assert.deepEqual(calls[0], ["load", "-w", "/tmp/ok.plist"]);
+    assert.deepEqual(calls[1], ["list"]);
+  });
+
+  it("launchctlLoadVerified throws when load exits 0 but the job never loads", () => {
+    // The silent-failure case: `launchctl load` returns 0 but the label is
+    // absent from `launchctl list`. Must throw so scheduleAdd rolls back.
+    const runner: LaunchctlRunner = (args) =>
+      args[0] === "load"
+        ? { status: 0, stdout: "", stderr: "" }
+        : { status: 0, stdout: "1\t0\tcom.apple.other\n", stderr: "" };
+    assert.throws(
+      () => launchctlLoadVerified("/tmp/x.plist", "com.dispatch.x", runner),
+      /not in 'launchctl list'/,
+    );
   });
 });

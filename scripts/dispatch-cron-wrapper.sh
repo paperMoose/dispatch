@@ -358,12 +358,37 @@ if [ "$RC" -eq 0 ] && command -v dispatch >/dev/null 2>&1; then
   dispatch _schedule-record-success "$NAME" || echo "WARN: failed to record last_success"
 fi
 
-# v1 notification: log a line. Slack send is not yet wired up — there's no
-# clean send-only helper in cursor-crm/scripts (only slack_dump.py for reads).
-# TODO: replace with a real Slack DM helper once one exists.
-if [ "$NOTIFY" = "slack" ]; then
-  echo "NOTIFY: schedule '$NAME' fired (rc=$RC). [TODO: post to Slack]"
-fi
+# Notification: surface a visible macOS banner so scheduled fires — and
+# especially FAILURES — aren't silent. This is the whole point of running a job
+# you can't see: if it breaks, you need to know. Driven by the schedule's
+# `notify` field:
+#   none (or unset) → no banner (stays fully silent, e.g. leap-scan)
+#   notification    → macOS banner on every fire (success + failure)
+#   slack           → macOS banner now (real Slack send isn't wired yet) + a
+#                     log line so the prompt-owned Slack post path is documented
+# Best-effort: a notification failure must never change the recorded rc. launchd
+# LaunchAgents run in the user's GUI session, so `display notification` reaches
+# Notification Center.
+notify_macos() {
+  local title="$1" message="$2"
+  osascript -e "display notification \"${message}\" with title \"${title}\" sound name \"Glass\"" >/dev/null 2>&1 || true
+}
+
+case "$NOTIFY" in
+  ""|none)
+    : # silent by request
+    ;;
+  *)
+    if [ "$RC" -eq 0 ]; then
+      notify_macos "dispatch ✓ $NAME" "Scheduled run completed (rc=0)"
+    else
+      notify_macos "dispatch ✗ $NAME failed" "Scheduled run exited rc=$RC — check ~/.dispatch/scheduled-logs/$NAME-$TS.log"
+    fi
+    if [ "$NOTIFY" = "slack" ]; then
+      echo "NOTIFY: schedule '$NAME' fired (rc=$RC). [Slack send not wired — surfaced via macOS notification; prompt may post to Slack via agent tools]"
+    fi
+    ;;
+esac
 
 # Final cleanup of run-once metadata. The plist file was already removed
 # pre-work; the metadata stays until here so any in-flight tooling can still
