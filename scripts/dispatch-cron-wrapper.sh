@@ -55,6 +55,20 @@ esac
 if [ -n "${EXTRA_PATH:-}" ]; then
   export PATH="$EXTRA_PATH"
 fi
+# Homebrew's shellenv often lives in an interactive rc file (~/.zshrc) that a
+# login shell (zsh -lc) does NOT source, so the resolved PATH can be missing
+# /opt/homebrew/bin where tmux/cmux live — and every tmux-hosted agent job then
+# dies at launch with "tmux is required". Guarantee the common Homebrew + local
+# bins are on PATH regardless of where shellenv was configured.
+for _hb in /opt/homebrew/bin /usr/local/bin; do
+  if [ -d "$_hb" ]; then
+    case ":$PATH:" in
+      *":$_hb:"*) ;;
+      *) PATH="$_hb:$PATH" ;;
+    esac
+  fi
+done
+export PATH
 # DISPATCH_BIN is set in the plist's EnvironmentVariables at registration
 # time (absolute path of the user's `dispatch` CLI). Use it when present so
 # we don't depend on PATH discovering nvm/asdf/etc. installations from
