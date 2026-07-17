@@ -39,6 +39,7 @@ import {
   gitRoot,
   worktreePath,
   createWorktree,
+  stripAskRules,
   removeWorktree,
   ensureTmux,
   ensureMultiplexer,
@@ -149,6 +150,7 @@ async function launchAgent(
   promptFileArg: string,
   nameOverride: string,
   config: Config,
+  noAsk: boolean,
 ): Promise<string | null> {
   let id: string;
   let prompt: string;
@@ -211,9 +213,13 @@ async function launchAgent(
   let wtPath: string;
   if (skipWorktree) {
     wtPath = gitRoot();
+    if (noAsk) {
+      log.warn("--no-ask ignored with --no-worktree (won't modify the main checkout's settings)");
+    }
   } else {
     createWorktree(id, branch, config);
     wtPath = worktreePath(id, config);
+    if (noAsk) stripAskRules(wtPath);
   }
 
   // Create multiplexer session — returns cmux workspace ID or "tmux"
@@ -317,6 +323,7 @@ export async function cmdRun(
   let extraArgs = "";
   let skipWorktree = false;
   let nameOverride = "";
+  let noAsk = false;
   let noAttach = false;
 
   let i = 0;
@@ -355,6 +362,10 @@ export async function cmdRun(
         skipWorktree = true;
         i++;
         break;
+      case "--no-ask":
+        noAsk = true;
+        i++;
+        break;
       case "--no-attach":
         noAttach = true;
         i++;
@@ -385,6 +396,7 @@ export async function cmdRun(
     console.log("  dispatch run HEY-837 --model sonnet          # specific model");
     console.log("  dispatch run HEY-837 --max-turns 10          # limit turns");
     console.log("  dispatch run HEY-837 --base main             # branch off main");
+    console.log("  dispatch run HEY-837 --no-ask                # strip ask-permission prompts in the worktree");
     process.exit(1);
   }
 
@@ -402,7 +414,7 @@ export async function cmdRun(
 
   const launchedIds: string[] = [];
   for (const input of inputs) {
-    const id = await launchAgent(input, headless, extraArgs, skipWorktree, promptFile, nameOverride, config);
+    const id = await launchAgent(input, headless, extraArgs, skipWorktree, promptFile, nameOverride, config, noAsk);
     if (id) launchedIds.push(id);
   }
 

@@ -112,6 +112,10 @@ dispatch run HEY-837 --headless
 
 # With options
 dispatch run HEY-837 --model sonnet --max-turns 10 --base main
+
+# Strip permission ask rules from the agent's worktree copy of .claude/settings.json
+# (fewer prompts for this agent only; file is marked skip-worktree so it can't be committed)
+dispatch run HEY-837 --no-ask
 ```
 
 ### Monitor

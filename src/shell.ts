@@ -194,6 +194,39 @@ export function createWorktree(
   log.ok(`Worktree created at ${wtPath}`);
 }
 
+/** Strip permission ask rules from the worktree's project settings so this
+ * agent runs without those prompts. Only touches the worktree's copy; the
+ * file is marked skip-worktree so the agent can't accidentally commit it. */
+export function stripAskRules(wtPath: string): void {
+  const relPath = join(".claude", "settings.json");
+  const settingsPath = join(wtPath, relPath);
+  if (!existsSync(settingsPath)) {
+    log.warn(`--no-ask: no ${relPath} in worktree, nothing to strip`);
+    return;
+  }
+
+  let settings: { permissions?: { ask?: string[] } };
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+  } catch {
+    log.warn(`--no-ask: could not parse ${relPath}, leaving it alone`);
+    return;
+  }
+
+  const askCount = settings.permissions?.ask?.length ?? 0;
+  if (askCount === 0) {
+    log.info(`--no-ask: no ask rules in ${relPath}`);
+    return;
+  }
+
+  settings.permissions!.ask = [];
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  spawnSync("git", ["-C", wtPath, "update-index", "--skip-worktree", relPath], {
+    stdio: "pipe",
+  });
+  log.ok(`Stripped ${askCount} ask rule(s) from worktree settings`);
+}
+
 export function removeWorktree(id: string, config: Config): boolean {
   const wtPath = worktreePath(id, config);
 
