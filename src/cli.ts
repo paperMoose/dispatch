@@ -59,13 +59,14 @@ Commands:
 
 Run Options:
   --headless, -H            Fire-and-forget mode (no interactive terminal)
-  --model, -m <model>       Claude model: sonnet, opus, haiku (default: from config)
+  --model, -m <model>       Claude model: 'opus[1m]', opus, sonnet, haiku (default: opus[1m])
   --name, -n <name>         Set agent name and branch (default: ticket ID or task-{random})
   --max-turns <n>           Limit agentic turns before stopping (headless only)
   --max-budget <usd>        Cap spending in USD (headless only)
   --base, -b <branch>       Branch to create worktree from (default: dev)
   --prompt-file, -f <file>  Load prompt from a file instead of CLI arg
   --no-worktree             Run in current directory (no isolation)
+  --ask                     Re-enable permission prompts (off by default)
 
 Lifecycle:
   1. run    — Creates worktree + branch, opens tmux window, starts Claude Code
@@ -86,6 +87,7 @@ Examples:
   dispatch run HEY-837 HEY-838 HEY-839                 # Batch launch 3 agents in parallel
   dispatch run "Fix the auth bug" --name HEY-879        # Free text with custom branch name
   dispatch run HEY-837 -m sonnet --max-turns 20         # Sonnet model, 20 turn limit
+  dispatch run HEY-837 --ask                            # Keep permission prompts on for this agent
   dispatch attach HEY-837                               # Jump to agent's terminal
   dispatch list                                         # See what's running
   dispatch cleanup --all --delete-branch                # Clean everything up
@@ -100,12 +102,14 @@ Tips:
 Environment:
   LINEAR_API_KEY         Linear API key for auto-fetching ticket details
   DISPATCH_BASE_BRANCH   Default base branch (default: dev)
-  DISPATCH_MODEL         Default model
+  DISPATCH_MODEL         Default model (default: opus[1m])
+  DISPATCH_PERMISSION_MODE  Permission mode for agents (default: dontAsk; "" for prompts)
   DISPATCH_CONFIG        Config file path (default: ~/.dispatch.yml)
 
 Config (~/.dispatch.yml):
   base_branch: dev        # Branch to create worktrees from
-  model: opus             # Default Claude model
+  model: opus[1m]         # Default Claude model (Opus 5, 1M context)
+  permission_mode: dontAsk  # Agents don't stop for permission prompts
   max_turns: 20           # Default max turns for headless
   claude_timeout: 30      # Seconds to wait for Claude to start
   worktree_dir: .worktrees  # Where worktrees are created`);

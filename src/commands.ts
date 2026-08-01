@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rea
 import { join, basename, dirname, resolve } from "path";
 import { homedir } from "os";
 import { execSync, spawnSync } from "child_process";
-import type { Config } from "./config.js";
+import { modelFlag, permissionModeFlag, type Config } from "./config.js";
 import {
   buildPlistXml,
   cronToLaunchdIntervals,
@@ -118,7 +118,8 @@ export function buildClaudeCmd(
 
   if (mode === "headless") cmd += " -p";
 
-  if (config.model) cmd += ` --model ${config.model}`;
+  if (config.model) cmd += ` ${modelFlag(config.model)}`;
+  if (config.permissionMode) cmd += ` ${permissionModeFlag(config.permissionMode)}`;
 
   if (mode === "headless") {
     cmd += ` --allowedTools "${config.allowedTools}"`;
@@ -137,6 +138,17 @@ export function buildClaudeCmd(
   }
 
   return cmd;
+}
+
+/** Launch line for an interactive pane. Unlike headless, the prompt is pasted
+ *  in after Claude's TUI is up, so this starts bare Claude. */
+export function interactiveClaudeCmd(config: Config, resume = false): string {
+  const parts = ["claude"];
+  if (resume) parts.push("--continue");
+  if (config.model) parts.push(modelFlag(config.model));
+  if (config.permissionMode) parts.push(permissionModeFlag(config.permissionMode));
+  parts.push(`--allowedTools "WebSearch,WebFetch"`);
+  return parts.join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +226,7 @@ async function launchAgent(
   if (skipWorktree) {
     wtPath = gitRoot();
     if (noAsk) {
-      log.warn("--no-ask ignored with --no-worktree (won't modify the main checkout's settings)");
+      log.info("ask rules left in place under --no-worktree (won't modify the main checkout's settings)");
     }
   } else {
     createWorktree(id, branch, config);
@@ -234,8 +246,7 @@ async function launchAgent(
     cmuxUpdateState(id, wtPath, "starting", `Launching agent (${mode})`);
 
     if (mode === "interactive") {
-      const modelFlag = config.model ? `--model ${config.model}` : "";
-      cmuxSend(wsId!, `unset CLAUDECODE && claude ${modelFlag} --allowedTools "WebSearch,WebFetch"`);
+      cmuxSend(wsId!, `unset CLAUDECODE && ${interactiveClaudeCmd(config)}`);
       waitForClaude(id, config.claudeTimeout);
       // Extra settle time — Claude's TUI needs a moment before accepting input
       spawnSync("sleep", ["2"]);
@@ -264,9 +275,9 @@ async function launchAgent(
     }
   } else if (mode === "interactive") {
     // Launch claude, wait for it to be ready, then send prompt via paste-buffer
-    const modelFlag = config.model ? `--model ${config.model}` : "";
+    const launch = interactiveClaudeCmd(config).replace(/"/g, '\\"');
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude ${modelFlag} --allowedTools \\"WebSearch,WebFetch\\"" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && ${launch}" Enter`,
     );
     waitForClaude(id, config.claudeTimeout);
 
@@ -323,7 +334,7 @@ export async function cmdRun(
   let extraArgs = "";
   let skipWorktree = false;
   let nameOverride = "";
-  let noAsk = false;
+  let noAsk = true;
   let noAttach = false;
 
   let i = 0;
@@ -363,7 +374,14 @@ export async function cmdRun(
         i++;
         break;
       case "--no-ask":
+        // Default since permissions-off became the default; kept so existing
+        // scripts and skills that pass it keep working.
         noAsk = true;
+        i++;
+        break;
+      case "--ask":
+        noAsk = false;
+        config.permissionMode = "";
         i++;
         break;
       case "--no-attach":
@@ -396,7 +414,7 @@ export async function cmdRun(
     console.log("  dispatch run HEY-837 --model sonnet          # specific model");
     console.log("  dispatch run HEY-837 --max-turns 10          # limit turns");
     console.log("  dispatch run HEY-837 --base main             # branch off main");
-    console.log("  dispatch run HEY-837 --no-ask                # strip ask-permission prompts in the worktree");
+    console.log("  dispatch run HEY-837 --ask                   # restore permission prompts (off by default)");
     process.exit(1);
   }
 
@@ -1006,8 +1024,7 @@ export function cmdResume(args: string[], config: Config): void {
     const wsId = sessionId;
     cmuxUpdateState(id, wtPath, "running", `Resuming agent (${headless ? "headless" : "interactive"})`);
     if (!headless) {
-      const modelFlag = config.model ? `--model ${config.model}` : "";
-      cmuxSend(wsId!, `unset CLAUDECODE && claude --continue ${modelFlag} --allowedTools "WebSearch,WebFetch"`);
+      cmuxSend(wsId!, `unset CLAUDECODE && ${interactiveClaudeCmd(config, true)}`);
       log.ok(`Resumed agent: ${id} (interactive)`);
       if (!noAttach) tmuxAttach(id, false);
     } else {
@@ -1018,9 +1035,9 @@ export function cmdResume(args: string[], config: Config): void {
       log.ok(`Resumed agent: ${id} (headless)`);
     }
   } else if (!headless) {
-    const modelFlag = config.model ? `--model ${config.model}` : "";
+    const launch = interactiveClaudeCmd(config, true).replace(/"/g, '\\"');
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && claude --continue ${modelFlag} --allowedTools \\"WebSearch,WebFetch\\"" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && ${launch}" Enter`,
     );
     log.ok(`Resumed agent: ${id} (interactive)`);
     if (!noAttach) tmuxAttach(id, false);
@@ -1709,16 +1726,18 @@ const CLAUDE_MD_SNIPPET = `
 
 Launch Claude Code agents in isolated git worktrees. Each agent gets its own branch, so it can make changes without affecting your working tree or other agents. Agents run inside tmux or cmux — interactive mode to watch/guide, headless for fire-and-forget.
 
-**Default model: Opus.** All agents use Opus unless you explicitly pass \`--model sonnet\` or \`--model haiku\`. Do not use Sonnet unless specifically requested.
+**Default model: Opus 5 with the 1M context window (\`opus[1m]\`).** All agents use it unless you explicitly pass \`--model sonnet\` or \`--model haiku\`. Do not use Sonnet unless specifically requested. Quote any model name containing brackets — \`--model 'opus[1m]'\` — or zsh will glob it.
+
+**Permission prompts are off by default.** Agents run with \`--permission-mode dontAsk\` and the worktree's \`permissions.ask\` rules stripped, so they don't stall waiting for approval. That also means a dispatched agent can push, merge, and run migrations unprompted inside its worktree — pass \`--ask\` when you want the prompts back.
 
 **When to use:** Hand off well-defined tasks (Linear tickets, bug fixes, features) to a parallel agent while you keep working. Avoid dispatching two agents to the same files — they'll create merge conflicts.
 
 \`\`\`bash
-# Launch agents (all use Opus by default)
+# Launch agents (all use Opus 5 / 1M context by default)
 dispatch run HEY-123                                  # From Linear ticket (auto-fetches title + description)
 dispatch run "Fix the auth bug" --name HEY-879        # Free text with custom branch name (hey-879)
 dispatch run HEY-123 --headless                       # Background — check with: dispatch logs HEY-123
-dispatch run HEY-123 --max-turns 20                   # Opus with 20 turn limit
+dispatch run HEY-123 --max-turns 20                   # Opus 5 with 20 turn limit
 dispatch run HEY-123 HEY-124 HEY-125                 # Batch launch in parallel
 
 # Monitor and interact
@@ -1734,9 +1753,9 @@ dispatch cleanup --all --delete-branch                # Clean up everything
 dispatch prune --merged --delete-branch               # Remove worktrees with merged PRs
 \`\`\`
 
-**Key flags:** \`--name/-n\` sets branch name, \`--model/-m\` picks model (default: opus), \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev.
+**Key flags:** \`--name/-n\` sets branch name, \`--model/-m\` picks model (default: \`opus[1m]\`), \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev, \`--ask\` to re-enable permission prompts.
 
-Config: \`~/.dispatch.yml\` (base_branch, model, max_turns, max_budget, worktree_dir, claude_timeout).
+Config: \`~/.dispatch.yml\` (base_branch, model, max_turns, max_budget, permission_mode, worktree_dir, claude_timeout).
 Requires: tmux or cmux, claude CLI, git.
 `;
 
@@ -1783,7 +1802,7 @@ Add options:
   --prompt-file <path>      Prompt file the agent runs (required unless --command)
   --command "<shell>"       Run a raw shell command instead of dispatch run
   --branch-prefix <str>     Branch name prefix (default: schedule name)
-  --model <m>               Claude model (sonnet|opus|haiku)
+  --model <m>               Claude model (default: opus[1m]; also opus|sonnet|haiku)
   --repo <path>             cd into this repo before invoking dispatch run
   --max-turns <n>           Forwarded to dispatch run --max-turns
   --notify none|notification|slack

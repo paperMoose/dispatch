@@ -4,8 +4,12 @@
 # Base branch for new worktrees (default: dev)
 base_branch: dev
 
-# Default Claude model (default: uses claude CLI default)
-# model: opus
+# Default Claude model (default: opus[1m] — Opus 5 with the 1M context window)
+# model: opus[1m]
+
+# Permission mode for agents (default: dontAsk — no prompts).
+# Set to "" to get normal permission prompts back.
+# permission_mode: dontAsk
 
 # Maximum agent turns for headless mode
 # max_turns: 20

@@ -8,17 +8,21 @@ export interface Config {
   maxTurns: string;
   maxBudget: string;
   allowedTools: string;
+  permissionMode: string;
   worktreeDir: string;
   claudeTimeout: number;
 }
 
 const DEFAULTS: Config = {
   baseBranch: "dev",
-  model: "opus",
+  model: "opus[1m]",
   maxTurns: "",
   maxBudget: "",
   allowedTools:
     "Bash,Read,Write,Edit,Glob,Grep,Task,WebSearch,WebFetch",
+  // Dispatched agents work unattended in a throwaway worktree; a permission
+  // prompt there stalls the run until someone notices. `--ask` restores prompts.
+  permissionMode: "dontAsk",
   worktreeDir: ".worktrees",
   claudeTimeout: 30,
 };
@@ -29,6 +33,7 @@ const KEY_MAP: Record<string, keyof Config> = {
   max_turns: "maxTurns",
   max_budget: "maxBudget",
   allowed_tools: "allowedTools",
+  permission_mode: "permissionMode",
   worktree_dir: "worktreeDir",
   claude_timeout: "claudeTimeout",
 };
@@ -81,6 +86,7 @@ export function loadConfig(cliOverrides?: Partial<Config>): Config {
     ["DISPATCH_MAX_TURNS", "maxTurns"],
     ["DISPATCH_MAX_BUDGET", "maxBudget"],
     ["DISPATCH_ALLOWED_TOOLS", "allowedTools"],
+    ["DISPATCH_PERMISSION_MODE", "permissionMode"],
     ["DISPATCH_CLAUDE_TIMEOUT", "claudeTimeout"],
   ];
   for (const [envVar, key] of envMap) {
@@ -101,4 +107,18 @@ export function loadConfig(cliOverrides?: Partial<Config>): Config {
   }
 
   return config;
+}
+
+/** Shell-safe `--model` flag, or "" when no model is set.
+ *  Model names can contain glob metacharacters (`opus[1m]`); zsh aborts the
+ *  command with "no matches found" if they reach the shell unquoted. */
+export function modelFlag(model: string): string {
+  if (!model) return "";
+  return `--model '${model.replace(/'/g, `'\\''`)}'`;
+}
+
+/** `--permission-mode` flag, or "" when prompts are wanted (`--ask`). */
+export function permissionModeFlag(mode: string): string {
+  if (!mode) return "";
+  return `--permission-mode ${mode}`;
 }

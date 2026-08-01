@@ -113,10 +113,19 @@ dispatch run HEY-837 --headless
 # With options
 dispatch run HEY-837 --model sonnet --max-turns 10 --base main
 
-# Strip permission ask rules from the agent's worktree copy of .claude/settings.json
-# (fewer prompts for this agent only; file is marked skip-worktree so it can't be committed)
-dispatch run HEY-837 --no-ask
+# Keep permission prompts on for this agent (they're off by default)
+dispatch run HEY-837 --ask
 ```
+
+**Permissions are off by default.** Every agent launches with `--permission-mode dontAsk`, and
+`permissions.ask` is emptied in the agent's worktree copy of `.claude/settings.json` (marked
+skip-worktree, so the agent can't commit that change — the team file and your other checkouts are
+untouched). Dispatched agents work unattended, and a permission prompt in a background pane stalls
+the run until someone notices it.
+
+The tradeoff: inside its worktree, an agent can push, merge PRs, run migrations, and hit cloud CLIs
+without asking. Use `--ask` when you'd rather approve those, or set `permission_mode: ""` in
+`~/.dispatch.yml` to make prompts the default again.
 
 ### Monitor
 
@@ -300,14 +309,16 @@ That fires every Friday at 4pm local: it queries the dev DB for `CallRun` outcom
 ```bash
 export LINEAR_API_KEY="lin_api_..."      # For ticket fetching
 export DISPATCH_BASE_BRANCH="dev"        # Default base branch
-export DISPATCH_MODEL="opus"             # Default model
+export DISPATCH_MODEL="opus[1m]"         # Default model (Opus 5, 1M context)
+export DISPATCH_PERMISSION_MODE=""       # "" restores permission prompts (default: dontAsk)
 ```
 
 ### Config file (`~/.dispatch.yml`)
 
 ```yaml
 base_branch: dev
-model: opus
+model: opus[1m]
+permission_mode: dontAsk
 max_turns: 20
 worktree_dir: .worktrees
 ```

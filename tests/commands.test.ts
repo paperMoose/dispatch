@@ -4,7 +4,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { mkdtempSync } from "fs";
-import { buildClaudeCmd, TICKET_RE } from "../src/commands.js";
+import { buildClaudeCmd, interactiveClaudeCmd, TICKET_RE } from "../src/commands.js";
 import type { Config } from "../src/config.js";
 
 function makeConfig(overrides?: Partial<Config>): Config {
@@ -14,6 +14,7 @@ function makeConfig(overrides?: Partial<Config>): Config {
     maxTurns: "",
     maxBudget: "",
     allowedTools: "Bash,Read,Write,Edit,Glob,Grep,Task,WebSearch,WebFetch",
+    permissionMode: "",
     worktreeDir: ".worktrees",
     claudeTimeout: 30,
     ...overrides,
@@ -37,12 +38,31 @@ describe("buildClaudeCmd", () => {
   it("adds model flag when set", () => {
     const wtPath = mkdtempSync(join(tmpdir(), "dispatch-test-"));
     const cmd = buildClaudeCmd("do stuff", "headless", wtPath, makeConfig({ model: "sonnet" }), "");
-    assert.ok(cmd.includes("--model sonnet"));
+    assert.ok(cmd.includes("--model 'sonnet'"));
   });
 
   it("model flag works in interactive mode too", () => {
     const cmd = buildClaudeCmd("do stuff", "interactive", "/tmp/wt", makeConfig({ model: "opus" }), "");
-    assert.equal(cmd, "claude --model opus");
+    assert.equal(cmd, "claude --model 'opus'");
+  });
+
+  it("quotes bracketed model names so zsh does not glob them", () => {
+    const cmd = buildClaudeCmd("do stuff", "interactive", "/tmp/wt", makeConfig({ model: "opus[1m]" }), "");
+    assert.equal(cmd, "claude --model 'opus[1m]'");
+  });
+
+  it("passes the permission mode through in both modes", () => {
+    const wtPath = mkdtempSync(join(tmpdir(), "dispatch-test-"));
+    const headless = buildClaudeCmd("do stuff", "headless", wtPath, makeConfig({ permissionMode: "dontAsk" }), "");
+    assert.ok(headless.includes("--permission-mode dontAsk"));
+
+    const interactive = buildClaudeCmd("do stuff", "interactive", "/tmp/wt", makeConfig({ permissionMode: "dontAsk" }), "");
+    assert.equal(interactive, "claude --permission-mode dontAsk");
+  });
+
+  it("omits the permission mode when prompts are wanted", () => {
+    const cmd = buildClaudeCmd("do stuff", "interactive", "/tmp/wt", makeConfig({ permissionMode: "" }), "");
+    assert.ok(!cmd.includes("--permission-mode"));
   });
 
   it("maxTurns and maxBudget only in headless", () => {
@@ -66,6 +86,23 @@ describe("buildClaudeCmd", () => {
     buildClaudeCmd("my prompt text", "headless", wtPath, makeConfig(), "");
     const written = readFileSync(join(wtPath, ".dispatch-prompt.txt"), "utf-8");
     assert.equal(written, "my prompt text");
+  });
+});
+
+describe("interactiveClaudeCmd", () => {
+  it("carries model and permission mode into the pane", () => {
+    const cmd = interactiveClaudeCmd(makeConfig({ model: "opus[1m]", permissionMode: "dontAsk" }));
+    assert.equal(cmd, `claude --model 'opus[1m]' --permission-mode dontAsk --allowedTools "WebSearch,WebFetch"`);
+  });
+
+  it("drops the permission mode under --ask", () => {
+    const cmd = interactiveClaudeCmd(makeConfig({ model: "opus", permissionMode: "" }));
+    assert.equal(cmd, `claude --model 'opus' --allowedTools "WebSearch,WebFetch"`);
+  });
+
+  it("puts --continue first when resuming", () => {
+    const cmd = interactiveClaudeCmd(makeConfig({ permissionMode: "dontAsk" }), true);
+    assert.equal(cmd, `claude --continue --permission-mode dontAsk --allowedTools "WebSearch,WebFetch"`);
   });
 });
 

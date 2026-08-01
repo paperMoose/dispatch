@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseSimpleYaml, loadConfig } from "../src/config.js";
+import { parseSimpleYaml, loadConfig, modelFlag, permissionModeFlag } from "../src/config.js";
 
 describe("parseSimpleYaml", () => {
   it("parses basic key:value pairs", () => {
@@ -43,6 +43,30 @@ describe("parseSimpleYaml", () => {
   });
 });
 
+describe("modelFlag", () => {
+  it("quotes the model so glob characters survive the shell", () => {
+    assert.equal(modelFlag("opus[1m]"), "--model 'opus[1m]'");
+  });
+
+  it("returns empty string when no model is set", () => {
+    assert.equal(modelFlag(""), "");
+  });
+
+  it("escapes embedded single quotes", () => {
+    assert.equal(modelFlag("o'us"), `--model 'o'\\''us'`);
+  });
+});
+
+describe("permissionModeFlag", () => {
+  it("renders the flag when a mode is set", () => {
+    assert.equal(permissionModeFlag("dontAsk"), "--permission-mode dontAsk");
+  });
+
+  it("returns empty string when prompts are wanted", () => {
+    assert.equal(permissionModeFlag(""), "");
+  });
+});
+
 describe("loadConfig", () => {
   it("returns defaults when no file or env", () => {
     const orig = process.env.DISPATCH_CONFIG;
@@ -55,6 +79,7 @@ describe("loadConfig", () => {
       "DISPATCH_MAX_TURNS",
       "DISPATCH_MAX_BUDGET",
       "DISPATCH_ALLOWED_TOOLS",
+      "DISPATCH_PERMISSION_MODE",
       "DISPATCH_CLAUDE_TIMEOUT",
     ];
     const saved: Record<string, string | undefined> = {};
@@ -66,9 +91,10 @@ describe("loadConfig", () => {
     try {
       const config = loadConfig();
       assert.equal(config.baseBranch, "dev");
-      assert.equal(config.model, "opus");
+      assert.equal(config.model, "opus[1m]");
       assert.equal(config.maxTurns, "");
       assert.equal(config.maxBudget, "");
+      assert.equal(config.permissionMode, "dontAsk");
       assert.equal(config.worktreeDir, ".worktrees");
       assert.equal(config.claudeTimeout, 30);
     } finally {

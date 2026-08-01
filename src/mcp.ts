@@ -12,6 +12,7 @@ import {
   existsSync,
 } from "fs";
 import { getAgentSummaries } from "./history.js";
+import { modelFlag } from "./config.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
@@ -78,7 +79,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           model: {
             type: "string",
-            description: "Claude model: sonnet, opus, haiku",
+            description:
+              "Claude model: opus[1m], opus, sonnet, haiku. Default: opus[1m] (Opus 5, 1M context).",
           },
           base_branch: {
             type: "string",
@@ -230,7 +232,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         parts.push(ticket || "prompt-file");
         parts.push(`--prompt-file "${tmpFile}"`);
         if (agentName) parts.push(`--name "${agentName}"`);
-        if (model) parts.push(`--model ${model}`);
+        if (model) parts.push(modelFlag(String(model)));
         if (base_branch) parts.push(`--base ${base_branch}`);
         if (max_turns) parts.push(`--max-turns ${max_turns}`);
 
