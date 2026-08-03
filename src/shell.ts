@@ -677,6 +677,27 @@ export { getCmuxWorkspaceId };
 // Agent readiness
 // ---------------------------------------------------------------------------
 
+/** True when an agent CLI process is actually running in this worktree.
+ *
+ *  Pane content cannot answer this: neither CLI uses the alternate screen, so
+ *  a dead agent's rendered TUI stays in the scrollback and still matches every
+ *  readiness marker. A tmux session outliving its agent is normal, and the
+ *  pane behind it is a live shell, so anything typed there executes. */
+export function agentProcessAlive(wtPath: string, bin: string): boolean {
+  const pids = execQuiet(`pgrep -x ${bin}`);
+  if (!pids) return false;
+
+  for (const pid of pids.trim().split("\n")) {
+    if (!/^\d+$/.test(pid)) continue;
+    const info = execQuiet(`lsof -a -p ${pid} -d cwd -Fn`);
+    if (!info) continue;
+    for (const line of info.split("\n")) {
+      if (line.startsWith("n") && line.slice(1) === wtPath) return true;
+    }
+  }
+  return false;
+}
+
 /** True when terminal content shows the Claude TUI is rendered and ready.
  *  Kept as a named export for callers that only ever drive Claude. */
 export function isClaudeReady(content: string): boolean {

@@ -4,7 +4,14 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { mkdtempSync } from "fs";
-import { buildClaudeCmd, interactiveClaudeCmd, TICKET_RE } from "../src/commands.js";
+import { writeFileSync } from "fs";
+import {
+  buildClaudeCmd,
+  interactiveClaudeCmd,
+  collapseForPane,
+  readAgentState,
+  TICKET_RE,
+} from "../src/commands.js";
 import type { Config } from "../src/config.js";
 
 function makeConfig(overrides?: Partial<Config>): Config {
@@ -120,5 +127,54 @@ describe("TICKET_RE", () => {
     assert.ok(!TICKET_RE.test("HEY-"));
     assert.ok(!TICKET_RE.test("-123"));
     assert.ok(!TICKET_RE.test("Fix the auth bug"));
+  });
+});
+
+describe("collapseForPane", () => {
+  it("flattens multi-line text into one submission", () => {
+    // tmux paste-buffer turns each newline into Enter, which was verified to
+    // execute multi-line text as separate shell commands.
+    const msg = "line one\nline two\nline three";
+    assert.equal(collapseForPane(msg), "line one line two line three");
+  });
+
+  it("collapses blank lines and surrounding whitespace", () => {
+    assert.equal(collapseForPane("a\n\n\n   b  \n c"), "a b c");
+  });
+
+  it("leaves single-line text alone", () => {
+    assert.equal(collapseForPane("just one line"), "just one line");
+  });
+
+  it("never emits a newline, whatever the input", () => {
+    for (const input of ["a\nb", "\n\n", "x\r\ny", " \n lead", "trail \n "]) {
+      assert.ok(!collapseForPane(input).includes("\n"), JSON.stringify(input));
+    }
+  });
+});
+
+describe("readAgentState", () => {
+  it("reads the runtime and mode from a JSON marker", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-marker-"));
+    writeFileSync(join(dir, ".dispatch-agent"), JSON.stringify({ agent: "codex", mode: "interactive" }));
+    assert.deepEqual(readAgentState(dir), { agent: "codex", mode: "interactive" });
+  });
+
+  it("reads a pre-0.9.1 marker holding only the runtime", () => {
+    // Worktrees created before the mode was recorded must keep working.
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-marker-"));
+    writeFileSync(join(dir, ".dispatch-agent"), "codex\n");
+    assert.deepEqual(readAgentState(dir), { agent: "codex", mode: null });
+  });
+
+  it("reports nothing for a worktree with no marker", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-marker-"));
+    assert.deepEqual(readAgentState(dir), { agent: "", mode: null });
+  });
+
+  it("survives a corrupt marker rather than throwing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-marker-"));
+    writeFileSync(join(dir, ".dispatch-agent"), "{not json");
+    assert.deepEqual(readAgentState(dir), { agent: "", mode: null });
   });
 });

@@ -379,6 +379,7 @@ export interface ScheduleMeta {
   branch_prefix?: string;
   agent?: string;
   model?: string;
+  reasoning_effort?: string;
   repo?: string;
   max_turns?: string;
   notify?: string;
@@ -396,6 +397,7 @@ const META_FIELDS: (keyof ScheduleMeta)[] = [
   "branch_prefix",
   "agent",
   "model",
+  "reasoning_effort",
   "repo",
   "max_turns",
   "notify",

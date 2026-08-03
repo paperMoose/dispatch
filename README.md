@@ -141,6 +141,8 @@ otherwise stops to ask whether it trusts the (brand new) worktree directory befo
 | | `--agent claude` (default) | `--agent codex` |
 |---|---|---|
 | Model flag | `--model opus[1m]` | `-m gpt-5.6-sol` |
+| Model config key | `model:` | `codex_model:` |
+| Reasoning depth | not exposed | `--effort` / `reasoning_effort:` |
 | Resume | `claude --continue` | `codex resume --last` |
 | Headless | `claude -p --output-format stream-json` | `codex exec --json` |
 | `--max-turns` / `--max-budget` | supported | no equivalent, warns and ignores |

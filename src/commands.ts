@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rea
 import { join, basename, dirname, resolve } from "path";
 import { homedir, tmpdir } from "os";
 import { execSync, spawnSync } from "child_process";
+import { randomBytes } from "crypto";
 import { type Config } from "./config.js";
 import {
   getAdapter,
@@ -62,6 +63,7 @@ import {
   fetchLinearTicket,
   notify,
   waitForAgent,
+  agentProcessAlive,
   tailFile,
   getCmuxWorkspaceId,
 } from "./shell.js";
@@ -170,25 +172,54 @@ function promptNotSent(
 
 const AGENT_MARKER = ".dispatch-agent";
 
-/** Pin the runtime to the worktree at launch, so later commands keep driving
- *  the CLI the agent actually started with even if the config changes. */
-function writeAgentMarker(wtPath: string, agent: string): void {
+/** Pin the runtime and mode to the worktree, so later commands keep driving the
+ *  CLI the agent actually started with, and know how it is running now.
+ *  Rewritten on resume, since resume can flip an agent between modes. */
+function writeAgentMarker(
+  wtPath: string,
+  agent: string,
+  mode: "interactive" | "headless",
+): void {
   try {
-    writeFileSync(join(wtPath, AGENT_MARKER), `${agent}\n`);
+    writeFileSync(
+      join(wtPath, AGENT_MARKER),
+      JSON.stringify({ agent, mode }) + "\n",
+    );
   } catch {
-    // Non-fatal: readAgentMarker falls back to the configured runtime.
+    // Non-fatal: readers fall back to the configured runtime.
   }
 }
 
 /** Runtime recorded for an existing worktree. Worktrees created before codex
  *  support have no marker, so they read as claude. */
 export function readAgentMarker(wtPath: string, fallback = "claude"): string {
+  return readAgentState(wtPath).agent || fallback;
+}
+
+/** Runtime and mode recorded for a worktree. Older markers hold a bare runtime
+ *  name rather than JSON, so parse both forms. */
+export function readAgentState(wtPath: string): {
+  agent: string;
+  mode: "interactive" | "headless" | null;
+} {
+  let raw: string;
   try {
-    const kind = readFileSync(join(wtPath, AGENT_MARKER), "utf-8").trim();
-    return kind || fallback;
+    raw = readFileSync(join(wtPath, AGENT_MARKER), "utf-8").trim();
   } catch {
-    return fallback;
+    return { agent: "", mode: null };
   }
+  if (!raw) return { agent: "", mode: null };
+
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw);
+      return { agent: parsed.agent || "", mode: parsed.mode || null };
+    } catch {
+      return { agent: "", mode: null };
+    }
+  }
+  // Pre-0.9.1 marker: runtime only, mode unknown.
+  return { agent: raw, mode: null };
 }
 
 /** @deprecated Runtime-neutral names are buildAgentCmd / interactiveAgentCmd. */
@@ -283,9 +314,9 @@ async function launchAgent(
   const sessionId = createSession(id, wtPath);
   if (!sessionId) return null;
 
-  writeAgentMarker(wtPath, config.agent);
-
   const mode = headless ? "headless" : "interactive";
+  writeAgentMarker(wtPath, config.agent, mode);
+
   const agentCmd = buildAgentCmd(prompt, mode, wtPath, config, extraArgs);
   const prefix = shellPrefix(config);
 
@@ -782,20 +813,11 @@ export function getPrInfo(branch: string): string {
   return "";
 }
 
-/** Parse a .dispatch.log stream into the shared status shape. Each runtime
- *  emits its own event format; the adapter normalizes it. */
-export function parseAgentLog(
-  logContent: string,
-  agent = "claude",
-): AgentLogSummary {
-  return getAdapter(agent).parseLog(logContent);
-}
-
 /** Format status for display (used by both CLI and MCP). */
 export function formatStatus(
   id: string,
   status: string,
-  parsed: ReturnType<typeof parseAgentLog>,
+  parsed: AgentLogSummary,
   pr?: string,
 ): string {
   const lines: string[] = [];
@@ -851,55 +873,77 @@ export function formatStatus(
 export function readAgentTrace(
   wtPath: string,
   agent: string,
+  opts: { mode?: "interactive" | "headless" | null; since?: number } = {},
 ): { parsed: AgentLogSummary; source: "log" | "session" } | null {
   const adapter = getAdapter(agent);
-
   const logFile = join(wtPath, ".dispatch.log");
-  if (existsSync(logFile)) {
-    try {
-      return {
-        parsed: adapter.parseLog(readFileSync(logFile, "utf-8")),
-        source: "log",
-      };
-    } catch {
-      // Fall through to the session transcript.
-    }
-  }
 
-  const sessionFile = adapter.findSessionFile(wtPath);
-  if (sessionFile) {
+  const fromLog = (): { parsed: AgentLogSummary; source: "log" } | null => {
+    if (!existsSync(logFile)) return null;
+    try {
+      const content = readFileSync(logFile, "utf-8");
+      // An empty or unparseable log yields zeros, which would read as "this
+      // agent has done nothing" rather than "look somewhere else".
+      const parsed = adapter.parseLog(content);
+      return parsed.turns > 0 ? { parsed, source: "log" } : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const fromSession = (): { parsed: AgentLogSummary; source: "session" } | null => {
+    const file = adapter.findSessionFile(wtPath, opts.since);
+    if (!file) return null;
     try {
       return {
-        parsed: adapter.parseSession(readFileSync(sessionFile, "utf-8")),
+        parsed: adapter.parseSession(readFileSync(file, "utf-8")),
         source: "session",
       };
     } catch {
       return null;
     }
-  }
+  };
 
-  return null;
+  // .dispatch.log is append-only and never deleted, so a worktree that once ran
+  // headless keeps its old log forever. Letting it win would report a finished
+  // run's turns and commits as the live state of an agent that has since been
+  // resumed interactively. Trust the recorded mode over the file's existence.
+  if (opts.mode === "interactive") return fromSession() || fromLog();
+  if (opts.mode === "headless") return fromLog() || fromSession();
+
+  // Mode unknown (worktree predates the marker): prefer whichever is fresher.
+  const sessionFile = adapter.findSessionFile(wtPath, opts.since);
+  const logTime = existsSync(logFile) ? statSync(logFile).mtimeMs : -1;
+  const sessionTime = sessionFile ? statSync(sessionFile).mtimeMs : -1;
+  return sessionTime > logTime ? fromSession() || fromLog() : fromLog() || fromSession();
 }
 
-/** Type text into a running agent's TUI and submit it. This is how the initial
- *  prompt is delivered, and how `dispatch send` posts follow-up messages to an
- *  agent that is already working. */
+/** Type text into a running agent's TUI and submit it. `dispatch send` uses
+ *  this to post follow-up messages to an agent that is already working. */
+/** Flatten text for delivery to a TUI. Every TUI treats Enter as submit, and
+ *  tmux paste-buffer converts each newline into one, so a multi-line message
+ *  would arrive as several fragmentary submissions. */
+export function collapseForPane(text: string): string {
+  return text.replace(/\s*\n+\s*/g, " ").trim();
+}
+
 function sendToPane(id: string, text: string): void {
+  const oneLine = collapseForPane(text);
+
   if (useCmux()) {
     const wsId = getCmuxWorkspaceId(id);
     if (!wsId) throw new Error(`No cmux workspace for agent '${id}'`);
-    // Collapse newlines: every TUI treats Enter as submit, so a multi-line
-    // paste would fragment into several separate messages.
-    cmuxSend(wsId, text.replace(/\n+/g, " "));
+    cmuxSend(wsId, oneLine);
     spawnSync("sleep", ["3"]);
     cmuxSendKey(wsId, "enter");
     return;
   }
 
-  // tmux pastes via a buffer, which preserves the text verbatim.
-  const bufName = `dispatch-${id.replace(/[^a-zA-Z0-9]/g, "-")}`;
+  // A random suffix keeps concurrent sends from racing on one temp file and
+  // one tmux buffer name, both of which are shared across the whole server.
+  const bufName = `dispatch-${id.replace(/[^a-zA-Z0-9]/g, "-")}-${randomBytes(4).toString("hex")}`;
   const tmp = join(tmpdir(), `${bufName}.txt`);
-  writeFileSync(tmp, text);
+  writeFileSync(tmp, oneLine, { mode: 0o600 });
   try {
     execSync(`tmux load-buffer -b "${bufName}" "${tmp}"`);
     execSync(`tmux paste-buffer -b "${bufName}" -t "${tmuxTarget(id)}"`);
@@ -941,18 +985,42 @@ export function cmdSend(args: string[], config: Config): void {
   }
 
   const wtPath = worktreePath(id, config);
-  // A headless agent reads its prompt from a file and never watches the pane,
-  // so typing at it would land in whatever shell follows the run.
-  if (existsSync(join(wtPath, ".dispatch.log"))) {
-    log.error(`Agent '${id}' is headless — it cannot receive messages.`);
+  const state = readAgentState(wtPath);
+
+  // A headless agent reads its prompt from a file and never watches the pane.
+  // Use the recorded mode: .dispatch.log is never deleted, so its presence
+  // only means the worktree ran headless once, not that it still is.
+  if (state.mode === "headless") {
+    log.error(`Agent '${id}' is headless and cannot receive messages.`);
     log.dim(`  Stop it and resume interactively to steer it: dispatch resume ${id}`);
     process.exit(1);
   }
 
-  const adapter = getAdapter(readAgentMarker(wtPath, config.agent));
+  const adapter = getAdapter(state.agent || config.agent);
+
+  // The decisive check, and it has to be the process rather than the screen:
+  // neither CLI uses the alternate screen, so a dead agent's TUI stays in the
+  // scrollback and still satisfies isReady. The pane behind it is a live
+  // shell, and a message typed there executes as commands.
+  if (!agentProcessAlive(wtPath, adapter.bin)) {
+    log.error(`No running ${adapter.bin} found in ${id}, so nothing was sent.`);
+    log.dim("  The pane is likely sitting at a shell after the agent exited.");
+    log.dim(`  Check it first: dispatch attach ${id}`);
+    process.exit(1);
+  }
+
   const screen = tmuxCapture(id, 40);
+
+  // A modal dialog swallows typed text and reads Enter as answering it, so a
+  // message here would silently confirm a permission or trust prompt instead.
+  if (adapter.dismissStartupDialog(screen)) {
+    log.error(`${adapter.bin} is waiting on a dialog in ${id}, so nothing was sent.`);
+    log.dim(`  Answer it first: dispatch attach ${id}`);
+    process.exit(1);
+  }
+
   if (adapter.isBusy(screen)) {
-    log.warn(`${adapter.bin} is mid-turn — the message will queue until it finishes`);
+    log.warn(`${adapter.bin} is mid-turn; the message will queue until it finishes`);
   }
 
   sendToPane(id, message);
@@ -975,7 +1043,6 @@ export function cmdStatus(args: string[], config: Config): void {
   }
 
   const wtPath = worktreePath(id, config);
-  const logFile = join(wtPath, ".dispatch.log");
 
   // Load history once for both state detection and final fallback
   const histSummaries = getAgentSummaries();
@@ -1001,7 +1068,11 @@ export function cmdStatus(args: string[], config: Config): void {
     agentStatus = hist.status;
   }
 
-  const trace = readAgentTrace(wtPath, readAgentMarker(wtPath, config.agent));
+  const state = readAgentState(wtPath);
+  const trace = readAgentTrace(wtPath, state.agent || config.agent, {
+    mode: state.mode,
+    since: hist?.launchedAt ? Date.parse(hist.launchedAt) : undefined,
+  });
   if (trace) {
     const pr = getPrInfo(id);
     const output = formatStatus(id, agentStatus, trace.parsed, pr);
@@ -1133,6 +1204,10 @@ export function cmdResume(args: string[], config: Config): void {
   if (!sessionId) return;
 
   config.agent = readAgentMarker(wtPath, config.agent);
+  // Resume can flip an agent between modes, and the marker is what `send` and
+  // `status` trust, so re-record it rather than leaving the launch-time value.
+  writeAgentMarker(wtPath, config.agent, headless ? "headless" : "interactive");
+
   const prefix = shellPrefix(config);
   const resumePrompt = "Continue working on the task.";
 
@@ -1866,9 +1941,9 @@ dispatch cleanup --all --delete-branch                # Clean up everything
 dispatch prune --merged --delete-branch               # Remove worktrees with merged PRs
 \`\`\`
 
-**Key flags:** \`--name/-n\` sets branch name, \`--agent/-A\` picks the runtime (\`claude\` default, or \`codex\`), \`--model/-m\` picks model (default: \`opus[1m]\`), \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev, \`--ask\` to re-enable permission prompts.
+**Key flags:** \`--name/-n\` sets branch name, \`--agent/-A\` picks the runtime (\`claude\` default, or \`codex\`), \`--effort\` sets codex reasoning depth, \`--model/-m\` picks model (default: \`opus[1m]\`), \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev, \`--ask\` to re-enable permission prompts.
 
-Config: \`~/.dispatch.yml\` (base_branch, agent, model, max_turns, max_budget, permission_mode, worktree_dir, agent_timeout).
+Config: \`~/.dispatch.yml\` (base_branch, agent, model, codex_model, reasoning_effort, max_turns, max_budget, permission_mode, worktree_dir, agent_timeout).
 Requires: tmux or cmux, the agent CLI (\`claude\` and/or \`codex\`), git.
 `;
 
@@ -1916,6 +1991,7 @@ Add options:
   --command "<shell>"       Run a raw shell command instead of dispatch run
   --branch-prefix <str>     Branch name prefix (default: schedule name)
   --agent <runtime>         Agent CLI: claude (default) or codex
+  --effort <level>          Codex reasoning depth (e.g. xhigh)
   --model <m>               Model for that runtime (claude default: opus[1m])
   --repo <path>             cd into this repo before invoking dispatch run
   --max-turns <n>           Forwarded to dispatch run --max-turns
@@ -1965,6 +2041,7 @@ export interface ScheduleAddArgs {
   command?: string;
   branchPrefix?: string;
   agent?: string;
+  effort?: string;
   model?: string;
   repo?: string;
   maxTurns?: string;
@@ -1985,6 +2062,7 @@ export function parseScheduleAddArgs(args: string[]): ScheduleAddArgs {
       case "--command": out.command = args[++i]; break;
       case "--branch-prefix": out.branchPrefix = args[++i]; break;
       case "--agent": out.agent = args[++i]; break;
+      case "--effort": out.effort = args[++i]; break;
       case "--model": out.model = args[++i]; break;
       case "--repo": out.repo = args[++i]; break;
       case "--max-turns": out.maxTurns = args[++i]; break;
@@ -2134,6 +2212,7 @@ function scheduleAdd(args: string[]): void {
     command: parsed.command,
     branch_prefix: parsed.branchPrefix,
     agent: parsed.agent,
+    reasoning_effort: parsed.effort,
     model: parsed.model,
     repo,
     max_turns: parsed.maxTurns,

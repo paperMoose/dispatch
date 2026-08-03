@@ -268,12 +268,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const parts: string[] = ["run"];
         parts.push(ticket || "prompt-file");
         parts.push(`--prompt-file "${tmpFile}"`);
-        if (agentName) parts.push(`--name "${agentName}"`);
-        if (agent) parts.push(`--agent ${agent}`);
-        if (effort) parts.push(`--effort ${effort}`);
+        // Every one of these comes from a model, and the schema's enums are
+        // advisory: nothing validates them before they reach a shell.
+        if (agentName) parts.push(`--name ${shellArg(String(agentName))}`);
+        if (agent) parts.push(`--agent ${shellArg(String(agent))}`);
+        if (effort) parts.push(`--effort ${shellArg(String(effort))}`);
         if (model) parts.push(modelFlag(String(model)));
-        if (base_branch) parts.push(`--base ${base_branch}`);
-        if (max_turns) parts.push(`--max-turns ${max_turns}`);
+        if (base_branch) parts.push(`--base ${shellArg(String(base_branch))}`);
+        if (max_turns) parts.push(`--max-turns ${shellArg(String(max_turns))}`);
 
         const output = dispatch(parts.join(" "));
         return { content: [{ type: "text", text: output }] };
@@ -307,14 +309,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "dispatch_stop": {
       const { agent_id } = args as Record<string, any>;
-      const output = dispatch(`stop ${agent_id}`);
+      const output = dispatch(`stop ${shellArg(String(agent_id))}`);
       return { content: [{ type: "text", text: output }] };
     }
 
     case "dispatch_resume": {
       const { agent_id } = args as Record<string, any>;
       const output = dispatch(
-        `resume ${agent_id} --no-attach`,
+        `resume ${shellArg(String(agent_id))} --no-attach`,
       );
       return { content: [{ type: "text", text: output }] };
     }
@@ -323,7 +325,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { agent_id, all, delete_branch } = args as Record<string, any>;
       const parts = ["cleanup"];
       if (all) parts.push("--all");
-      else if (agent_id) parts.push(agent_id);
+      else if (agent_id) parts.push(shellArg(String(agent_id)));
       if (delete_branch) parts.push("--delete-branch");
       const output = dispatch(parts.join(" "));
       return { content: [{ type: "text", text: output }] };
@@ -331,13 +333,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "dispatch_logs": {
       const { agent_id, lines = 50 } = args as Record<string, any>;
+      // `lines` reaches a shell below, and nothing validates the schema's type.
+      const lineCount = Number.isFinite(Number(lines))
+        ? Math.max(1, Math.min(10_000, Math.trunc(Number(lines))))
+        : 50;
       const cwd = process.env.DISPATCH_CWD || process.cwd();
-      const logPath = join(cwd, ".worktrees", agent_id, ".dispatch.log");
+      const logPath = join(cwd, ".worktrees", String(agent_id), ".dispatch.log");
 
       if (existsSync(logPath)) {
         const content = readFileSync(logPath, "utf-8");
         const logLines = content.split("\n");
-        const lastLines = logLines.slice(-lines).join("\n");
+        const lastLines = logLines.slice(-lineCount).join("\n");
         return {
           content: [{ type: "text", text: stripAnsi(lastLines) }],
         };
@@ -346,7 +352,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Fallback: capture tmux pane
       try {
         const output = execSync(
-          `tmux capture-pane -t "dispatch-${agent_id}" -p -S -${lines}`,
+          `tmux capture-pane -t ${shellArg(`dispatch-${agent_id}`)} -p -S -${lineCount}`,
           { encoding: "utf-8", timeout: 5000 },
         );
         return {
@@ -380,7 +386,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "dispatch_status": {
       const { agent_id } = args as Record<string, any>;
-      const output = dispatch(`status ${agent_id}`);
+      const output = dispatch(`status ${shellArg(String(agent_id))}`);
       return { content: [{ type: "text", text: output }] };
     }
 

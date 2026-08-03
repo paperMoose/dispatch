@@ -6,7 +6,16 @@
 // readiness markers, and log parsing. The rest of the codebase should never
 // name a specific CLI.
 // ---------------------------------------------------------------------------
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { homedir } from "os";
 import { basename, join } from "path";
 import { modelFlag, permissionModeFlag, type Config } from "./config.js";
@@ -14,6 +23,11 @@ import { modelFlag, permissionModeFlag, type Config } from "./config.js";
 export type AgentKind = "claude" | "codex";
 
 export const AGENT_KINDS: AgentKind[] = ["claude", "codex"];
+
+/** Single-quote a value so shell metacharacters cannot escape the command. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
 
 export function isAgentKind(value: string): value is AgentKind {
   return (AGENT_KINDS as string[]).includes(value);
@@ -76,7 +90,7 @@ export interface AgentAdapter {
   /** Path to the CLI's own session transcript for a worktree, or null.
    *  Interactive agents write no .dispatch.log, so this is the only way an
    *  orchestrator can see what an interactive agent is doing. */
-  findSessionFile(wtPath: string): string | null;
+  findSessionFile(wtPath: string, since?: number): string | null;
 
   /** Parse that session transcript. Its shape differs from the headless
    *  stream, so it gets its own parser. */
@@ -85,7 +99,13 @@ export interface AgentAdapter {
 
 /** Newest-first files under `dir`, recursing at most `depth` levels. Used to
  *  locate session transcripts without walking an unbounded history. */
-function recentFiles(dir: string, match: RegExp, depth = 4, limit = 60): string[] {
+function recentFiles(
+  dir: string,
+  match: RegExp,
+  depth = 4,
+  limit = 60,
+  since?: number,
+): string[] {
   const found: { path: string; mtime: number }[] = [];
 
   const walk = (current: string, left: number): void => {
@@ -106,6 +126,9 @@ function recentFiles(dir: string, match: RegExp, depth = 4, limit = 60): string[
       if (st.isDirectory()) {
         if (left > 0) walk(full, left - 1);
       } else if (match.test(entry)) {
+        // A transcript last written before the agent launched belongs to an
+        // earlier run in the same worktree path, not to this one.
+        if (since !== undefined && st.mtimeMs < since) continue;
         found.push({ path: full, mtime: st.mtimeMs });
       }
     }
@@ -148,8 +171,12 @@ class SummaryBuilder {
    *  element and so carries no quotes once joined. Prefer argv when present. */
   shellCommand(command: string, argv?: string[] | null): void {
     if (command.includes("git commit") || command.includes("git push")) {
+      // Only trust a -m that follows `git commit` in the same argv, otherwise
+      // an unrelated flag (`grep -m 5 … git commit`) is read as the message.
+      const gitIdx = argv ? argv.indexOf("git") : -1;
+      const mIdx = argv ? argv.indexOf("-m", gitIdx) : -1;
       const argvMsg =
-        argv && argv.indexOf("-m") !== -1 ? argv[argv.indexOf("-m") + 1] : undefined;
+        argv && gitIdx !== -1 && mIdx > gitIdx ? argv[mIdx + 1] : undefined;
       const quoted = command.match(/-m\s+["']([^"']+)["']/);
 
       if (argvMsg) {
@@ -191,6 +218,26 @@ function eachJsonLine(content: string, fn: (obj: any) => void): void {
   }
 }
 
+/** First `bytes` of a file, or null if unreadable. Transcripts reach tens of
+ *  megabytes, so this reads a bounded chunk rather than loading the file. */
+function readHead(file: string, bytes: number): string | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, "r");
+    const buf = Buffer.alloc(bytes);
+    const read = readSync(fd, buf, 0, bytes, 0);
+    return buf.subarray(0, read).toString("utf-8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
 /** True when a transcript belongs to `wtPath`. Only the head of the file is
  *  inspected: both runtimes record cwd early, and transcripts get large. */
 function sessionCwdMatches(
@@ -198,12 +245,8 @@ function sessionCwdMatches(
   wtPath: string,
   extract: (obj: any) => string | undefined,
 ): boolean {
-  let head: string;
-  try {
-    head = readFileSync(file, "utf-8").slice(0, 64_000);
-  } catch {
-    return false;
-  }
+  const head = readHead(file, 64_000);
+  if (head === null) return false;
   for (const line of head.split("\n")) {
     if (!line.trim()) continue;
     let obj: any;
@@ -286,19 +329,19 @@ const claudeAdapter: AgentAdapter = {
   // Claude Code writes one transcript per session under a directory derived
   // from the cwd. Every line carries `cwd`, so match on that rather than
   // trusting the directory-name escaping, which is undocumented.
-  findSessionFile(wtPath) {
+  findSessionFile(wtPath, since) {
     const root = join(homedir(), ".claude", "projects");
     if (!existsSync(root)) return null;
 
-    const guess = join(root, wtPath.replace(/[^a-zA-Z0-9]/g, "-"));
-    const candidates = existsSync(guess)
-      ? recentFiles(guess, /\.jsonl$/, 1)
-      : recentFiles(root, /\.jsonl$/, 2);
+    // Claude derives the project directory from the cwd, so every transcript
+    // inside it already belongs to this worktree. Matching on the `cwd` field
+    // as well would reject a just-started session, whose opening records carry
+    // no cwd yet, and hand back a previous run's transcript instead.
+    const dir = join(root, wtPath.replace(/[^a-zA-Z0-9]/g, "-"));
+    if (!existsSync(dir)) return null;
 
-    for (const file of candidates) {
-      if (sessionCwdMatches(file, wtPath, (obj) => obj.cwd)) return file;
-    }
-    return null;
+    const candidates = recentFiles(dir, /\.jsonl$/, 1, 10, since);
+    return candidates[0] || null;
   },
 
   // Session transcripts carry the same assistant/message shape as the
@@ -358,12 +401,29 @@ const claudeAdapter: AgentAdapter = {
  *  unless a sandbox policy is given explicitly, and every dispatch worktree is
  *  a brand new path — so one of these must be present on every launch or the
  *  agent stalls on a trust dialog before the prompt is ever sent. */
-function codexSandboxFlags(config: Config): string {
+function codexSandboxFlags(
+  config: Config,
+  form: "tui" | "exec" | "exec-resume",
+): string {
   // permissionMode is cleared by `--ask`, which is dispatch's "let a human
   // approve" switch. Everything else runs unattended.
-  return config.permissionMode
-    ? "--dangerously-bypass-approvals-and-sandbox"
-    : "-s workspace-write -a on-request";
+  if (config.permissionMode) {
+    // Accepted on all three forms.
+    return "--dangerously-bypass-approvals-and-sandbox";
+  }
+
+  // The approval/sandbox flags are not available on every subcommand:
+  // `codex exec` takes -s but rejects -a, and `codex exec resume` rejects
+  // both, so the equivalent has to go through -c config overrides.
+  switch (form) {
+    case "tui":
+      return "-s workspace-write -a on-request";
+    case "exec":
+      // Nothing can answer an approval prompt in a headless run anyway.
+      return "-s workspace-write";
+    case "exec-resume":
+      return "-c sandbox_mode=workspace-write";
+  }
 }
 
 /** The update banner renders a blocking menu that swallows the keystrokes
@@ -374,7 +434,9 @@ const CODEX_NO_UPDATE_CHECK = "-c check_for_update_on_startup=false";
  *  Claude has no CLI equivalent, so the setting is codex-only. */
 function codexEffortFlag(config: Config): string {
   if (!config.reasoningEffort) return "";
-  return `-c model_reasoning_effort=${config.reasoningEffort}`;
+  // This is typed into a pane shell, so an unquoted value would break out of
+  // the codex command entirely.
+  return `-c ${shellQuote(`model_reasoning_effort=${config.reasoningEffort}`)}`;
 }
 
 const codexAdapter: AgentAdapter = {
@@ -396,9 +458,12 @@ const codexAdapter: AgentAdapter = {
     if (config.codexModel) parts.push(modelFlag(config.codexModel, "-m"));
     const effort = codexEffortFlag(config);
     if (effort) parts.push(effort);
-    parts.push(codexSandboxFlags(config));
-    // --search and the update-check override are TUI-only; `codex exec`
-    // rejects them outright.
+
+    const form =
+      mode === "headless" ? (resume ? "exec-resume" : "exec") : "tui";
+    parts.push(codexSandboxFlags(config, form));
+
+    // --search is TUI-only; `codex exec` rejects it outright.
     if (mode === "interactive") {
       parts.push("--search", CODEX_NO_UPDATE_CHECK);
     }
@@ -423,7 +488,7 @@ const codexAdapter: AgentAdapter = {
     if (config.codexModel) parts.push(modelFlag(config.codexModel, "-m"));
     const effort = codexEffortFlag(config);
     if (effort) parts.push(effort);
-    parts.push(codexSandboxFlags(config));
+    parts.push(codexSandboxFlags(config, "tui"));
     parts.push("--search");
     parts.push(CODEX_NO_UPDATE_CHECK);
     return parts.join(" ");
@@ -462,12 +527,13 @@ const codexAdapter: AgentAdapter = {
   // Codex writes a rollout transcript per session, tagged with the cwd it ran
   // in, so an interactive agent's activity is recoverable even though it
   // produces no .dispatch.log.
-  findSessionFile(wtPath) {
+  findSessionFile(wtPath, since) {
     const root = join(homedir(), ".codex", "sessions");
     if (!existsSync(root)) return null;
 
-    // Sessions are bucketed YYYY/MM/DD, so depth 4 covers the date tree.
-    for (const file of recentFiles(root, /^rollout-.*\.jsonl$/, 4)) {
+    // Codex pools every session under one date tree rather than per-cwd, so
+    // the cwd in session_meta is the only way to tell them apart.
+    for (const file of recentFiles(root, /^rollout-.*\.jsonl$/, 4, 60, since)) {
       const matches = sessionCwdMatches(file, wtPath, (obj) =>
         obj.type === "session_meta" ? obj.payload?.cwd : undefined,
       );
@@ -495,14 +561,15 @@ const codexAdapter: AgentAdapter = {
             // Authoritative final answer for the turn.
             if (payload.last_agent_message) b.lastText = payload.last_agent_message;
             break;
-          case "patch_apply_begin":
+          case "patch_apply_end":
+            if (payload.success === false) break;
             for (const path of Object.keys(payload.changes || {})) {
               b.file(path);
               b.tool("Edit");
               b.action(`Edited ${basename(path)}`);
             }
             break;
-          case "exec_command_begin": {
+          case "exec_command_end": {
             const argv = Array.isArray(payload.command) ? payload.command : null;
             const cmd = argv ? argv.join(" ") : payload.command;
             if (typeof cmd === "string") {
@@ -521,10 +588,12 @@ const codexAdapter: AgentAdapter = {
         // it is a plain literal, and fall back to naming the tool when it is
         // not — better a coarse action than a wrong one.
         b.tool(payload.name === "exec" ? "Bash" : payload.name || "tool");
+        // Code-mode input is JS: tools.exec_command({"cmd":"git commit …"}).
+        // The key is `cmd`, and it is normally JSON-quoted.
         const literal = String(payload.input || "").match(
-          /exec_command\(\s*\{[^}]*?command:\s*(["'`])([\s\S]*?)\1/,
+          /exec_command\(\s*\{[^}]*?["']?cmd["']?\s*:\s*"((?:[^"\\]|\\.)*)"/,
         );
-        if (literal) b.shellCommand(literal[2]);
+        if (literal) b.shellCommand(literal[1].replace(/\\(.)/g, "$1"));
         else if (payload.name) b.action(`Ran ${payload.name}`);
       }
     });
@@ -536,6 +605,19 @@ const codexAdapter: AgentAdapter = {
     const b = new SummaryBuilder();
 
     eachJsonLine(content, (obj) => {
+      // A run that died on a bad model or an API error otherwise parses to all
+      // zeros, which is indistinguishable from an agent that just started.
+      if (obj.type === "error" && obj.message) {
+        b.lastText = `Error: ${obj.message}`;
+        b.action("Run failed");
+        return;
+      }
+      if (obj.type === "turn.failed") {
+        const msg = obj.error?.message || obj.message;
+        b.lastText = msg ? `Turn failed: ${msg}` : "Turn failed";
+        b.action("Turn failed");
+        return;
+      }
       if (obj.type !== "item.completed") return;
       const item = obj.item;
       if (!item) return;

@@ -232,13 +232,26 @@ describe("codex reasoning effort", () => {
   it("passes effort as a config override on both modes", () => {
     const config = makeConfig({ agent: "codex", reasoningEffort: "xhigh" });
     assert.ok(
-      codex.paneCmd(config, false).includes("-c model_reasoning_effort=xhigh"),
+      codex.paneCmd(config, false).includes("-c 'model_reasoning_effort=xhigh'"),
     );
     assert.ok(
       codex
         .runCmd("p", "headless", wt(), config, "", false)
-        .includes("-c model_reasoning_effort=xhigh"),
+        .includes("-c 'model_reasoning_effort=xhigh'"),
     );
+  });
+
+  // The value is typed into a pane shell, so it must not be able to escape it.
+  it("quotes the effort so it cannot break out of the command", () => {
+    const cmd = codex.paneCmd(
+      makeConfig({ agent: "codex", reasoningEffort: "high; touch /tmp/PWNED" }),
+      false,
+    );
+    // The payload must sit inside one quoted argument, so the shell sees a
+    // single -c value rather than a second command after the semicolon.
+    assert.ok(cmd.includes(`-c 'model_reasoning_effort=high; touch /tmp/PWNED'`));
+    const afterQuoted = cmd.split(`/tmp/PWNED'`)[1] || "";
+    assert.ok(!afterQuoted.includes("touch"), `escaped the quotes: ${cmd}`);
   });
 
   it("omits it when unset so codex uses its own default", () => {
@@ -392,8 +405,8 @@ const CODEX_ROLLOUT = [
   `{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`,
   `{"type":"event_msg","payload":{"type":"user_message","message":"do the thing"}}`,
   `{"type":"event_msg","payload":{"type":"agent_message","message":"Starting on it."}}`,
-  `{"type":"event_msg","payload":{"type":"exec_command_begin","command":["git","commit","-m","add probe"]}}`,
-  `{"type":"event_msg","payload":{"type":"patch_apply_begin","changes":{"/wt/agent-a/hello.txt":{"add":{}}}}}`,
+  `{"type":"event_msg","payload":{"type":"exec_command_end","command":["git","commit","-m","add probe"],"cwd":"/wt/agent-a"}}`,
+  `{"type":"event_msg","payload":{"type":"patch_apply_end","success":true,"changes":{"/wt/agent-a/hello.txt":{"type":"add"}}}}`,
   `{"type":"event_msg","payload":{"type":"agent_message","message":"Committed."}}`,
   `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Current branch: codex-smoke"}}`,
 ].join("\n");
@@ -409,11 +422,11 @@ describe("codex session transcript parsing", () => {
     assert.equal(parsed.lastText, "Current branch: codex-smoke");
   });
 
-  it("extracts commits from exec_command_begin arrays", () => {
+  it("extracts commits from exec_command_end argv arrays", () => {
     assert.deepEqual(parsed.commits, ["add probe"]);
   });
 
-  it("extracts changed files from patch_apply_begin", () => {
+  it("extracts changed files from patch_apply_end", () => {
     assert.deepEqual(parsed.filesModified, ["/wt/agent-a/hello.txt"]);
   });
 
@@ -442,5 +455,49 @@ describe("session file discovery", () => {
     for (const kind of AGENT_KINDS) {
       assert.equal(getAdapter(kind).findSessionFile("/nonexistent/worktree-xyz"), null);
     }
+  });
+});
+
+describe("codex rollout parsing matches what codex actually emits", () => {
+  const codex = getAdapter("codex");
+
+  // Regression: the parser originally handled exec_command_begin and
+  // patch_apply_begin, which codex never emits. Across 33 real rollout files
+  // there were 279 exec_command_end and 32 patch_apply_end, and zero of the
+  // _begin variants, so every interactive codex trace reported no files and
+  // no commits.
+  it("ignores the _begin names that codex does not emit", () => {
+    const begins = [
+      `{"type":"event_msg","payload":{"type":"exec_command_begin","command":["git","commit","-m","x"]}}`,
+      `{"type":"event_msg","payload":{"type":"patch_apply_begin","changes":{"/a.txt":{"type":"add"}}}}`,
+    ].join("\n");
+    const parsed = codex.parseSession(begins);
+    assert.deepEqual(parsed.commits, []);
+    assert.deepEqual(parsed.filesModified, []);
+  });
+
+  it("skips a failed patch rather than claiming the file changed", () => {
+    const failed = `{"type":"event_msg","payload":{"type":"patch_apply_end","success":false,"changes":{"/a.txt":{"type":"add"}}}}`;
+    assert.deepEqual(codex.parseSession(failed).filesModified, []);
+  });
+
+  it("only reads -m that belongs to the git command", () => {
+    // `grep -m 5 ... git commit` must not be recorded as a commit message.
+    const decoys = [
+      `{"type":"event_msg","payload":{"type":"exec_command_end","command":["grep","-m","5","git","commit","x"]}}`,
+      `{"type":"event_msg","payload":{"type":"exec_command_end","command":["ssh","-m","hmac-sha2-256","h","git","push"]}}`,
+    ].join("\n");
+    assert.deepEqual(codex.parseSession(decoys).commits, []);
+  });
+
+  it("does not crash when -m is the final argument", () => {
+    const truncated = `{"type":"event_msg","payload":{"type":"exec_command_end","command":["git","commit","--amend","-m"]}}`;
+    assert.deepEqual(codex.parseSession(truncated).commits, []);
+  });
+
+  it("recovers a command from code-mode exec input", () => {
+    // Real shape: tools.exec_command({"cmd":"...","workdir":"..."})
+    const codeMode = `{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"const r = await tools.exec_command({\\"cmd\\":\\"git commit -m 'add hello'\\",\\"workdir\\":\\"/wt\\"})"}}`;
+    assert.deepEqual(codex.parseSession(codeMode).commits, ["add hello"]);
   });
 });
