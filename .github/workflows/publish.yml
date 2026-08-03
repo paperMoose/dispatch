@@ -7,16 +7,29 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+
+    # Trusted Publishing: npm mints a short-lived credential from this OIDC
+    # token instead of a stored NPM_TOKEN. Nothing to rotate, and it satisfies
+    # the account's 2FA requirement, which automation tokens only ever bypassed.
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1+; Node 22 ships npm 10.
+      - name: Use an npm that supports trusted publishing
+        run: npm install -g npm@latest
 
       - run: npm ci
       - run: npm run build
+      - run: npm test
 
       - name: Check if version changed
         id: version
@@ -25,14 +38,27 @@ jobs:
           NPM_VERSION=$(npm view dispatch-agents version 2>/dev/null || echo "0.0.0")
           if [ "$PACKAGE_VERSION" = "$NPM_VERSION" ]; then
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "Version $PACKAGE_VERSION already published, skipping"
+            echo "::warning::Version $PACKAGE_VERSION already published — nothing shipped."
           else
             echo "changed=true" >> $GITHUB_OUTPUT
             echo "Publishing $PACKAGE_VERSION (npm has $NPM_VERSION)"
           fi
 
+      # No NODE_AUTH_TOKEN: the OIDC exchange happens inside npm publish.
       - name: Publish
         if: steps.version.outputs.changed == 'true'
         run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Confirm the version actually landed
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          for i in $(seq 1 10); do
+            if [ "$(npm view dispatch-agents version 2>/dev/null)" = "$PACKAGE_VERSION" ]; then
+              echo "Confirmed $PACKAGE_VERSION on the registry."
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::error::npm publish reported success but the registry never showed $PACKAGE_VERSION."
+          exit 1
