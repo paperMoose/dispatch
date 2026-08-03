@@ -100,6 +100,7 @@ PROMPT_FILE=$(get_field prompt_file)
 PROMPT_B64=$(get_field prompt_b64)
 COMMAND_FIELD=$(get_field command)
 BRANCH_PREFIX=$(get_field branch_prefix)
+AGENT=$(get_field agent)
 MODEL=$(get_field model)
 REPO=$(get_field repo)
 MAX_TURNS=$(get_field max_turns)
@@ -215,6 +216,9 @@ elif [ -n "$PROMPT_FILE" ]; then
   BRANCH_NAME="${BRANCH_PREFIX:-$NAME}-$(date +%Y%m%d-%H%M)"
   WORK_CMD=$(printf 'dispatch run --headless --no-attach --prompt-file %q --name %q' \
     "$PROMPT_FILE" "$BRANCH_NAME")
+  if [ -n "$AGENT" ]; then
+    WORK_CMD="$WORK_CMD $(printf '%s %q' --agent "$AGENT")"
+  fi
   if [ -n "$MODEL" ]; then
     WORK_CMD="$WORK_CMD $(printf '%s %q' --model "$MODEL")"
   fi

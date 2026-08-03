@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { parseSimpleYaml, loadConfig, modelFlag, permissionModeFlag } from "../src/config.js";
 
 describe("parseSimpleYaml", () => {
@@ -64,6 +67,67 @@ describe("permissionModeFlag", () => {
 
   it("returns empty string when prompts are wanted", () => {
     assert.equal(permissionModeFlag(""), "");
+  });
+});
+
+describe("agent runtime config", () => {
+  const withCleanEnv = (fn: () => void) => {
+    const saved: Record<string, string | undefined> = {};
+    for (const k of ["DISPATCH_CONFIG", "DISPATCH_AGENT"]) {
+      saved[k] = process.env[k];
+    }
+    process.env.DISPATCH_CONFIG = "/nonexistent/.dispatch.yml";
+    delete process.env.DISPATCH_AGENT;
+    try {
+      fn();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v !== undefined) process.env[k] = v;
+        else delete process.env[k];
+      }
+    }
+  };
+
+  it("defaults to claude", () => {
+    withCleanEnv(() => assert.equal(loadConfig().agent, "claude"));
+  });
+
+  it("reads DISPATCH_AGENT from the environment", () => {
+    withCleanEnv(() => {
+      process.env.DISPATCH_AGENT = "codex";
+      assert.equal(loadConfig().agent, "codex");
+    });
+  });
+
+  it("lets a CLI override beat the environment", () => {
+    withCleanEnv(() => {
+      process.env.DISPATCH_AGENT = "codex";
+      assert.equal(loadConfig({ agent: "claude" }).agent, "claude");
+    });
+  });
+
+  it("reads agent and the agent_timeout alias from a config file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-cfg-"));
+    const file = join(dir, ".dispatch.yml");
+    writeFileSync(file, "agent: codex\nagent_timeout: 45\n");
+    const saved = process.env.DISPATCH_CONFIG;
+    process.env.DISPATCH_CONFIG = file;
+    try {
+      const config = loadConfig();
+      assert.equal(config.agent, "codex");
+      // agent_timeout is the runtime-neutral spelling of claude_timeout.
+      assert.equal(config.claudeTimeout, 45);
+    } finally {
+      if (saved !== undefined) process.env.DISPATCH_CONFIG = saved;
+      else delete process.env.DISPATCH_CONFIG;
+    }
+  });
+});
+
+describe("modelFlag runtime differences", () => {
+  it("uses -m for codex and --model by default", () => {
+    assert.equal(modelFlag("gpt-5.6-sol", "-m"), "-m 'gpt-5.6-sol'");
+    assert.equal(modelFlag("opus[1m]"), "--model 'opus[1m]'");
   });
 });
 

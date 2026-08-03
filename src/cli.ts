@@ -33,11 +33,12 @@ const pkg = JSON.parse(
 const VERSION: string = pkg.version;
 
 function help(): void {
-  console.log(`dispatch — Launch Claude Code agents in isolated git worktrees
+  console.log(`dispatch — Launch coding agents in isolated git worktrees
 
 Each agent gets its own branch and worktree, so it can make changes without
 affecting your working tree or other agents. Agents run inside tmux — use
 interactive mode to watch and guide them, or headless for fire-and-forget.
+Agents run on Claude Code by default, or Codex with --agent codex.
 
 Commands:
   dispatch run <ticket|prompt> [options]   Launch an agent
@@ -59,7 +60,9 @@ Commands:
 
 Run Options:
   --headless, -H            Fire-and-forget mode (no interactive terminal)
-  --model, -m <model>       Claude model: 'opus[1m]', opus, sonnet, haiku (default: opus[1m])
+  --agent, -A <runtime>     Agent CLI to drive: claude, codex (default: claude)
+  --model, -m <model>       Model for that runtime. Claude: 'opus[1m]', opus, sonnet,
+                            haiku (default: opus[1m]). Codex: gpt-5.6-sol, etc.
   --name, -n <name>         Set agent name and branch (default: ticket ID or task-{random})
   --max-turns <n>           Limit agentic turns before stopping (headless only)
   --max-budget <usd>        Cap spending in USD (headless only)
@@ -69,11 +72,11 @@ Run Options:
   --ask                     Re-enable permission prompts (off by default)
 
 Lifecycle:
-  1. run    — Creates worktree + branch, opens tmux window, starts Claude Code
+  1. run    — Creates worktree + branch, opens tmux window, starts the agent CLI
   2. work   — Agent reads codebase, makes changes, commits, pushes, creates PRs
   3. attach — View/interact with the agent (auto-opens terminal tab if no TTY)
   4. stop   — Interrupt the agent (worktree and branch preserved)
-  5. resume — Pick up where it left off (Claude --continue)
+  5. resume — Pick up where it left off (claude --continue / codex resume)
   6. cleanup — Remove worktree when done (--delete-branch to also delete the branch)
 
 Input Types:
@@ -87,6 +90,8 @@ Examples:
   dispatch run HEY-837 HEY-838 HEY-839                 # Batch launch 3 agents in parallel
   dispatch run "Fix the auth bug" --name HEY-879        # Free text with custom branch name
   dispatch run HEY-837 -m sonnet --max-turns 20         # Sonnet model, 20 turn limit
+  dispatch run HEY-837 --agent codex                    # Run on Codex instead of Claude
+  dispatch run HEY-837 -A codex -m gpt-5.6-sol          # Codex with a specific model
   dispatch run HEY-837 --ask                            # Keep permission prompts on for this agent
   dispatch attach HEY-837                               # Jump to agent's terminal
   dispatch list                                         # See what's running
@@ -102,16 +107,18 @@ Tips:
 Environment:
   LINEAR_API_KEY         Linear API key for auto-fetching ticket details
   DISPATCH_BASE_BRANCH   Default base branch (default: dev)
+  DISPATCH_AGENT         Default agent runtime: claude or codex (default: claude)
   DISPATCH_MODEL         Default model (default: opus[1m])
   DISPATCH_PERMISSION_MODE  Permission mode for agents (default: dontAsk; "" for prompts)
   DISPATCH_CONFIG        Config file path (default: ~/.dispatch.yml)
 
 Config (~/.dispatch.yml):
   base_branch: dev        # Branch to create worktrees from
-  model: opus[1m]         # Default Claude model (Opus 5, 1M context)
+  agent: claude           # Agent runtime: claude or codex
+  model: opus[1m]         # Default model for that runtime
   permission_mode: dontAsk  # Agents don't stop for permission prompts
   max_turns: 20           # Default max turns for headless
-  claude_timeout: 30      # Seconds to wait for Claude to start
+  agent_timeout: 30       # Seconds to wait for the agent TUI to start
   worktree_dir: .worktrees  # Where worktrees are created`);
 }
 

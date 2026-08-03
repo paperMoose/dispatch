@@ -1,6 +1,8 @@
 # dispatch
 
-Multiplex Claude Code agents from a single conversation. Fan out work across tickets, each agent opens in its own terminal tab on its own branch, then fold results back in when they're done.
+Multiplex coding agents from a single conversation. Fan out work across tickets, each agent opens in its own terminal tab on its own branch, then fold results back in when they're done.
+
+Agents run on **Claude Code** by default, or **Codex** with `--agent codex`. Every other command works the same either way.
 
 ```
 You: "Work on HEY-837, HEY-842, and HEY-845"
@@ -36,7 +38,7 @@ npm link
 
 - Node.js 20+
 - `tmux` — `brew install tmux`
-- `claude` — [Claude Code CLI](https://code.claude.com)
+- An agent CLI — [`claude`](https://code.claude.com) and/or [`codex`](https://developers.openai.com/codex/cli). You only need the one you dispatch to.
 - `git` — for worktree management
 
 ### Supported terminals
@@ -113,6 +115,10 @@ dispatch run HEY-837 --headless
 # With options
 dispatch run HEY-837 --model sonnet --max-turns 10 --base main
 
+# Run on Codex instead of Claude Code
+dispatch run HEY-837 --agent codex
+dispatch run HEY-837 -A codex -m gpt-5.6-sol
+
 # Keep permission prompts on for this agent (they're off by default)
 dispatch run HEY-837 --ask
 ```
@@ -122,6 +128,23 @@ dispatch run HEY-837 --ask
 skip-worktree, so the agent can't commit that change — the team file and your other checkouts are
 untouched). Dispatched agents work unattended, and a permission prompt in a background pane stalls
 the run until someone notices it.
+
+On Codex the same posture is `--dangerously-bypass-approvals-and-sandbox`; `--ask` swaps it for
+`-s workspace-write -a on-request`. Codex always launches with an explicit sandbox flag, since it
+otherwise stops to ask whether it trusts the (brand new) worktree directory before running anything.
+
+### Runtime differences
+
+| | `--agent claude` (default) | `--agent codex` |
+|---|---|---|
+| Model flag | `--model opus[1m]` | `-m gpt-5.6-sol` |
+| Resume | `claude --continue` | `codex resume --last` |
+| Headless | `claude -p --output-format stream-json` | `codex exec --json` |
+| `--max-turns` / `--max-budget` | supported | no equivalent, warns and ignores |
+| Instructions file | `CLAUDE.md` | `AGENTS.md` |
+
+The runtime is recorded in the worktree at launch, so `status`, `logs`, and `resume` keep driving
+the CLI the agent actually started with even if you change your config afterwards.
 
 The tradeoff: inside its worktree, an agent can push, merge PRs, run migrations, and hit cloud CLIs
 without asking. Use `--ask` when you'd rather approve those, or set `permission_mode: ""` in
@@ -214,7 +237,7 @@ When the schedule fires, launchd invokes `scripts/dispatch-cron-wrapper.sh`. The
 2. Loads metadata from `~/.dispatch/schedules/<name>.yml`.
 3. Runs the **idempotency gate**: `dispatch _schedule-should-fire <name>` checks whether the current cron slot has already been served (via `~/.dispatch/schedules/<name>.last_success`). If yes, the wrapper exits without doing work. This is what keeps `RunAtLoad` from re-firing the schedule on every routine login (see "Catch-up" below).
 4. `cd`s into `--repo` if set.
-5. Runs `dispatch run --headless --no-attach --prompt-file <path> --name <branch-prefix>-YYYYMMDD-HHMM` (plus `--model` / `--max-turns` if set), or `--command "<shell>"` for raw commands.
+5. Runs `dispatch run --headless --no-attach --prompt-file <path> --name <branch-prefix>-YYYYMMDD-HHMM` (plus `--agent` / `--model` / `--max-turns` if set), or `--command "<shell>"` for raw commands.
 6. Tees stdout/stderr to `~/.dispatch/scheduled-logs/<name>-<timestamp>.log`.
 7. On `rc=0`, writes the current timestamp to `~/.dispatch/schedules/<name>.last_success`.
 8. Self-removes the plist + metadata if the schedule was a `--at` one-off (the plist is removed *before* the work, so a crashed wrapper can't strand it).

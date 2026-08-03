@@ -121,3 +121,23 @@ describe("parseScheduleAddArgs", () => {
     assert.equal(out.name, "voice.reliability_check-v2");
   });
 });
+
+describe("parseScheduleAddArgs agent runtime", () => {
+  it("captures --agent so scheduled runs keep their runtime", () => {
+    const out = parseScheduleAddArgs([
+      "nightly",
+      "--cron",
+      "0 9 * * 5",
+      "--prompt",
+      "check things",
+      "--agent",
+      "codex",
+    ]);
+    assert.equal(out.agent, "codex");
+  });
+
+  it("leaves agent unset when not given", () => {
+    const out = parseScheduleAddArgs(["nightly", "--cron", "0 9 * * 5", "--prompt", "x"]);
+    assert.equal(out.agent, undefined);
+  });
+});

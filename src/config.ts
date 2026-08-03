@@ -4,7 +4,13 @@ import { homedir } from "os";
 
 export interface Config {
   baseBranch: string;
+  /** Which agent CLI to drive: "claude" or "codex". See src/agents.ts. */
+  agent: string;
+  /** Model for the claude runtime. */
   model: string;
+  /** Model for the codex runtime. Empty means "use codex's own default",
+   *  since model names are not portable between runtimes. */
+  codexModel: string;
   maxTurns: string;
   maxBudget: string;
   allowedTools: string;
@@ -15,7 +21,9 @@ export interface Config {
 
 const DEFAULTS: Config = {
   baseBranch: "dev",
+  agent: "claude",
   model: "opus[1m]",
+  codexModel: "",
   maxTurns: "",
   maxBudget: "",
   allowedTools:
@@ -29,13 +37,17 @@ const DEFAULTS: Config = {
 
 const KEY_MAP: Record<string, keyof Config> = {
   base_branch: "baseBranch",
+  agent: "agent",
   model: "model",
+  codex_model: "codexModel",
   max_turns: "maxTurns",
   max_budget: "maxBudget",
   allowed_tools: "allowedTools",
   permission_mode: "permissionMode",
   worktree_dir: "worktreeDir",
   claude_timeout: "claudeTimeout",
+  // Runtime-neutral alias for claude_timeout, which predates codex support.
+  agent_timeout: "claudeTimeout",
 };
 
 export function parseSimpleYaml(content: string): Record<string, string> {
@@ -82,7 +94,9 @@ export function loadConfig(cliOverrides?: Partial<Config>): Config {
   // 2. Env vars override config file
   const envMap: [string, keyof Config][] = [
     ["DISPATCH_BASE_BRANCH", "baseBranch"],
+    ["DISPATCH_AGENT", "agent"],
     ["DISPATCH_MODEL", "model"],
+    ["DISPATCH_CODEX_MODEL", "codexModel"],
     ["DISPATCH_MAX_TURNS", "maxTurns"],
     ["DISPATCH_MAX_BUDGET", "maxBudget"],
     ["DISPATCH_ALLOWED_TOOLS", "allowedTools"],
@@ -109,12 +123,13 @@ export function loadConfig(cliOverrides?: Partial<Config>): Config {
   return config;
 }
 
-/** Shell-safe `--model` flag, or "" when no model is set.
+/** Shell-safe model flag, or "" when no model is set. `flag` varies by runtime
+ *  (claude takes `--model`, codex takes `-m`).
  *  Model names can contain glob metacharacters (`opus[1m]`); zsh aborts the
  *  command with "no matches found" if they reach the shell unquoted. */
-export function modelFlag(model: string): string {
+export function modelFlag(model: string, flag = "--model"): string {
   if (!model) return "";
-  return `--model '${model.replace(/'/g, `'\\''`)}'`;
+  return `${flag} '${model.replace(/'/g, `'\\''`)}'`;
 }
 
 /** `--permission-mode` flag, or "" when prompts are wanted (`--ask`). */

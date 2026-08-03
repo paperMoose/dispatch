@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rea
 import { join, basename, dirname, resolve } from "path";
 import { homedir } from "os";
 import { execSync, spawnSync } from "child_process";
-import { modelFlag, permissionModeFlag, type Config } from "./config.js";
+import { type Config } from "./config.js";
+import {
+  getAdapter,
+  isAgentKind,
+  AGENT_KINDS,
+  type AgentLogSummary,
+} from "./agents.js";
 import {
   buildPlistXml,
   cronToLaunchdIntervals,
@@ -55,7 +61,7 @@ import {
   tmuxAttach,
   fetchLinearTicket,
   notify,
-  waitForClaude,
+  waitForAgent,
   tailFile,
   getCmuxWorkspaceId,
 } from "./shell.js";
@@ -105,51 +111,90 @@ function slugify(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Build Claude command
+// Build agent command
 // ---------------------------------------------------------------------------
-export function buildClaudeCmd(
+
+/** Warn once per run about flags the selected runtime has no equivalent for. */
+function warnUnsupported(config: Config): void {
+  if (config.agent !== "codex") return;
+  if (config.maxTurns || config.maxBudget) {
+    log.warn("codex has no --max-turns/--max-budget equivalent; ignoring");
+  }
+}
+
+export function buildAgentCmd(
   prompt: string,
   mode: "interactive" | "headless",
   wtPath: string,
   config: Config,
   extraArgs: string,
+  resume = false,
 ): string {
-  let cmd = "claude";
-
-  if (mode === "headless") cmd += " -p";
-
-  if (config.model) cmd += ` ${modelFlag(config.model)}`;
-  if (config.permissionMode) cmd += ` ${permissionModeFlag(config.permissionMode)}`;
-
-  if (mode === "headless") {
-    cmd += ` --allowedTools "${config.allowedTools}"`;
-    if (config.maxTurns) cmd += ` --max-turns ${config.maxTurns}`;
-    if (config.maxBudget) cmd += ` --max-budget-usd ${config.maxBudget}`;
-    cmd += " --output-format stream-json --verbose";
-  }
-
-  if (extraArgs) cmd += ` ${extraArgs}`;
-
-  if (mode === "headless") {
-    const promptFile = join(wtPath, ".dispatch-prompt.txt");
-    writeFileSync(promptFile, prompt);
-    // Use stdin redirection — command substitution gets mangled by tmux send-keys
-    cmd += ` < '${promptFile}'`;
-  }
-
-  return cmd;
+  warnUnsupported(config);
+  return getAdapter(config.agent).runCmd(
+    prompt,
+    mode,
+    wtPath,
+    config,
+    extraArgs,
+    resume,
+  );
 }
 
 /** Launch line for an interactive pane. Unlike headless, the prompt is pasted
- *  in after Claude's TUI is up, so this starts bare Claude. */
-export function interactiveClaudeCmd(config: Config, resume = false): string {
-  const parts = ["claude"];
-  if (resume) parts.push("--continue");
-  if (config.model) parts.push(modelFlag(config.model));
-  if (config.permissionMode) parts.push(permissionModeFlag(config.permissionMode));
-  parts.push(`--allowedTools "WebSearch,WebFetch"`);
-  return parts.join(" ");
+ *  in after the agent's TUI is up, so this starts the CLI bare. */
+export function interactiveAgentCmd(config: Config, resume = false): string {
+  return getAdapter(config.agent).paneCmd(config, resume);
 }
+
+/** Prefix both launch lines need in the pane (e.g. `unset CLAUDECODE && `). */
+function shellPrefix(config: Config): string {
+  return getAdapter(config.agent).shellPrefix;
+}
+
+/** The TUI never came up, so the pane is most likely a live shell. Pasting the
+ *  prompt there would run it as shell commands, so save it and bail instead. */
+function promptNotSent(
+  id: string,
+  wtPath: string,
+  prompt: string,
+  config: Config,
+): void {
+  const pf = join(wtPath, ".dispatch-prompt.txt");
+  writeFileSync(pf, prompt);
+  log.error(`${getAdapter(config.agent).bin} never reached its prompt — nothing sent`);
+  log.dim(`  The pane may be sitting at a shell. Check it: dispatch attach ${id}`);
+  log.dim(`  Prompt saved to ${pf}`);
+  log.dim(`  Common causes: a model the runtime does not know, or auth expired`);
+}
+
+const AGENT_MARKER = ".dispatch-agent";
+
+/** Pin the runtime to the worktree at launch, so later commands keep driving
+ *  the CLI the agent actually started with even if the config changes. */
+function writeAgentMarker(wtPath: string, agent: string): void {
+  try {
+    writeFileSync(join(wtPath, AGENT_MARKER), `${agent}\n`);
+  } catch {
+    // Non-fatal: readAgentMarker falls back to the configured runtime.
+  }
+}
+
+/** Runtime recorded for an existing worktree. Worktrees created before codex
+ *  support have no marker, so they read as claude. */
+export function readAgentMarker(wtPath: string, fallback = "claude"): string {
+  try {
+    const kind = readFileSync(join(wtPath, AGENT_MARKER), "utf-8").trim();
+    return kind || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** @deprecated Runtime-neutral names are buildAgentCmd / interactiveAgentCmd. */
+export const buildClaudeCmd = buildAgentCmd;
+/** @deprecated */
+export const interactiveClaudeCmd = interactiveAgentCmd;
 
 // ---------------------------------------------------------------------------
 // Launch agent (core logic)
@@ -238,19 +283,26 @@ async function launchAgent(
   const sessionId = createSession(id, wtPath);
   if (!sessionId) return null;
 
+  writeAgentMarker(wtPath, config.agent);
+
   const mode = headless ? "headless" : "interactive";
-  const claudeCmd = buildClaudeCmd(prompt, mode, wtPath, config, extraArgs);
+  const agentCmd = buildAgentCmd(prompt, mode, wtPath, config, extraArgs);
+  const prefix = shellPrefix(config);
 
   if (useCmux()) {
     const wsId = sessionId;  // use the ID we just created, don't re-resolve
     cmuxUpdateState(id, wtPath, "starting", `Launching agent (${mode})`);
 
     if (mode === "interactive") {
-      cmuxSend(wsId!, `unset CLAUDECODE && ${interactiveClaudeCmd(config)}`);
-      waitForClaude(id, config.claudeTimeout);
-      // Extra settle time — Claude's TUI needs a moment before accepting input
+      cmuxSend(wsId!, `${prefix}${interactiveAgentCmd(config)}`);
+      const ready = waitForAgent(id, config.claudeTimeout, getAdapter(config.agent));
+      if (!ready) {
+        promptNotSent(id, wtPath, prompt, config);
+        return id;
+      }
+      // Extra settle time — the TUI needs a moment before accepting input
       spawnSync("sleep", ["2"]);
-      cmuxUpdateState(id, wtPath, "starting", "Claude ready, sending prompt");
+      cmuxUpdateState(id, wtPath, "starting", "Agent ready, sending prompt");
 
       // Save prompt to file for reference (preserves original formatting)
       const pf = join(wtPath, ".dispatch-prompt.txt");
@@ -266,7 +318,7 @@ async function launchAgent(
     } else {
       const logFile = join(wtPath, ".dispatch.log");
       cmuxUpdateState(id, wtPath, "running", "Headless agent started");
-      cmuxSend(wsId!, `unset CLAUDECODE && ${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}`);
+      cmuxSend(wsId!, `${prefix}${agentCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}`);
       // Set up progress tracking via pipe-pane for headless agents with max-turns
       if (config.maxTurns) {
         const progressScript = `dispatch _track-progress ${id} ${config.maxTurns}`;
@@ -274,12 +326,15 @@ async function launchAgent(
       }
     }
   } else if (mode === "interactive") {
-    // Launch claude, wait for it to be ready, then send prompt via paste-buffer
-    const launch = interactiveClaudeCmd(config).replace(/"/g, '\\"');
+    // Launch the agent, wait for it to be ready, then send prompt via paste-buffer
+    const launch = interactiveAgentCmd(config).replace(/"/g, '\\"');
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && ${launch}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "${prefix}${launch}" Enter`,
     );
-    waitForClaude(id, config.claudeTimeout);
+    if (!waitForAgent(id, config.claudeTimeout, getAdapter(config.agent))) {
+      promptNotSent(id, wtPath, prompt, config);
+      return id;
+    }
 
     // Write prompt to file and paste via tmux buffer
     const pf = join(wtPath, ".dispatch-prompt.txt");
@@ -296,7 +351,7 @@ async function launchAgent(
     // Headless: run with -p, tee to log, notify on completion
     const logFile = join(wtPath, ".dispatch.log");
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && ${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "${prefix}${agentCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
     );
   }
 
@@ -336,6 +391,7 @@ export async function cmdRun(
   let nameOverride = "";
   let noAsk = true;
   let noAttach = false;
+  let modelOverride = "";
 
   let i = 0;
   while (i < args.length) {
@@ -348,9 +404,24 @@ export async function cmdRun(
         break;
       case "--model":
       case "-m":
-        config.model = args[++i];
+        // Applied after the loop: which runtime it belongs to depends on
+        // --agent, which may appear either side of it.
+        modelOverride = args[++i];
         i++;
         break;
+      case "--agent":
+      case "-A": {
+        const kind = args[++i];
+        if (!isAgentKind(kind)) {
+          log.error(
+            `Unknown agent runtime: ${kind}. Expected one of: ${AGENT_KINDS.join(", ")}`,
+          );
+          process.exit(1);
+        }
+        config.agent = kind;
+        i++;
+        break;
+      }
       case "--max-turns":
         config.maxTurns = args[++i];
         i++;
@@ -404,6 +475,10 @@ export async function cmdRun(
     }
   }
 
+  if (modelOverride) {
+    config[getAdapter(config.agent).modelKey] = modelOverride;
+  }
+
   if (inputs.length === 0 && !promptFile) {
     log.error("Usage: dispatch run <ticket|prompt> [ticket2 ...] [options]");
     console.log();
@@ -412,6 +487,7 @@ export async function cmdRun(
     console.log('  dispatch run HEY-837 --headless              # run in background');
     console.log('  dispatch run "Fix the auth bug"               # free text prompt');
     console.log("  dispatch run HEY-837 --model sonnet          # specific model");
+    console.log("  dispatch run HEY-837 --agent codex           # run on Codex instead of Claude");
     console.log("  dispatch run HEY-837 --max-turns 10          # limit turns");
     console.log("  dispatch run HEY-837 --base main             # branch off main");
     console.log("  dispatch run HEY-837 --ask                   # restore permission prompts (off by default)");
@@ -702,104 +778,13 @@ export function getPrInfo(branch: string): string {
   return "";
 }
 
-const MAX_ACTIONS = 8;
-
-/** Parse a .dispatch.log JSON stream and extract structured status. */
-export function parseAgentLog(logContent: string): {
-  turns: number;
-  filesModified: string[];
-  toolsUsed: Map<string, number>;
-  commits: string[];
-  lastActions: string[];
-  lastText: string;
-} {
-  let turnCount = 0;
-  const filesModified = new Set<string>();
-  const toolsUsed = new Map<string, number>();
-  const commits: string[] = [];
-  // Ring buffer — only keep the last MAX_ACTIONS entries
-  const lastActions: string[] = [];
-  let lastText = "";
-
-  const lines = logContent.split("\n");
-
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    let obj: any;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue;
-    }
-
-    if (obj.type === "assistant") {
-      turnCount++;
-      const content = obj.message?.content;
-      if (!Array.isArray(content)) continue;
-
-      for (const block of content) {
-        if (block.type === "text" && block.text) {
-          lastText = block.text;
-        }
-        if (block.type === "tool_use") {
-          const name = block.name || "unknown";
-          toolsUsed.set(name, (toolsUsed.get(name) || 0) + 1);
-
-          // Track file modifications
-          const input = block.input || {};
-          if (
-            (name === "Edit" || name === "Write" || name === "NotebookEdit") &&
-            input.file_path
-          ) {
-            filesModified.add(input.file_path);
-          }
-
-          // Track commits from Bash
-          if (name === "Bash" && typeof input.command === "string") {
-            const cmd = input.command;
-            if (cmd.includes("git commit") || cmd.includes("git push")) {
-              const msgMatch = cmd.match(/-m\s+["']([^"']+)["']/);
-              if (msgMatch) {
-                commits.push(msgMatch[1].slice(0, 100));
-              } else if (cmd.includes("git push")) {
-                pushAction("Pushed to remote");
-              }
-            }
-            if (cmd.includes("gh pr create")) {
-              pushAction("Created PR");
-            }
-          }
-
-          // Build action description
-          if (name === "Edit" && input.file_path) {
-            pushAction(`Edited ${basename(input.file_path)}`);
-          } else if (name === "Write" && input.file_path) {
-            pushAction(`Created ${basename(input.file_path)}`);
-          } else if (name === "Read" && input.file_path) {
-            pushAction(`Read ${basename(input.file_path)}`);
-          } else if (name === "Grep") {
-            pushAction(`Searched for "${(input.pattern || "").slice(0, 30)}"`);
-          } else if (name === "Bash" && input.command) {
-            pushAction(`Ran: ${input.command.slice(0, 50)}`);
-          }
-        }
-      }
-    }
-  }
-
-  function pushAction(action: string) {
-    if (lastActions.length >= MAX_ACTIONS) lastActions.shift();
-    lastActions.push(action);
-  }
-
-  return {
-    turns: turnCount,
-    filesModified: Array.from(filesModified),
-    toolsUsed,
-    commits,
-    lastActions,
-    lastText,
-  };
+/** Parse a .dispatch.log stream into the shared status shape. Each runtime
+ *  emits its own event format; the adapter normalizes it. */
+export function parseAgentLog(
+  logContent: string,
+  agent = "claude",
+): AgentLogSummary {
+  return getAdapter(agent).parseLog(logContent);
 }
 
 /** Format status for display (used by both CLI and MCP). */
@@ -892,7 +877,7 @@ export function cmdStatus(args: string[], config: Config): void {
   // Try log file first
   if (existsSync(logFile)) {
     const content = readFileSync(logFile, "utf-8");
-    const parsed = parseAgentLog(content);
+    const parsed = parseAgentLog(content, readAgentMarker(wtPath, config.agent));
     const pr = getPrInfo(id);
 
     const output = formatStatus(id, agentStatus, parsed, pr);
@@ -1020,39 +1005,35 @@ export function cmdResume(args: string[], config: Config): void {
   const sessionId = createSession(id, wtPath);
   if (!sessionId) return;
 
+  config.agent = readAgentMarker(wtPath, config.agent);
+  const prefix = shellPrefix(config);
+  const resumePrompt = "Continue working on the task.";
+
   if (useCmux()) {
     const wsId = sessionId;
     cmuxUpdateState(id, wtPath, "running", `Resuming agent (${headless ? "headless" : "interactive"})`);
     if (!headless) {
-      cmuxSend(wsId!, `unset CLAUDECODE && ${interactiveClaudeCmd(config, true)}`);
+      cmuxSend(wsId!, `${prefix}${interactiveAgentCmd(config, true)}`);
       log.ok(`Resumed agent: ${id} (interactive)`);
       if (!noAttach) tmuxAttach(id, false);
     } else {
-      const resumePrompt = "Continue working on the task.";
-      const claudeCmd = buildClaudeCmd(resumePrompt, "headless", wtPath, config, "--continue");
+      const agentCmd = buildAgentCmd(resumePrompt, "headless", wtPath, config, "", true);
       const logFile = join(wtPath, ".dispatch.log");
-      cmuxSend(wsId!, `unset CLAUDECODE && ${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}`);
+      cmuxSend(wsId!, `${prefix}${agentCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}`);
       log.ok(`Resumed agent: ${id} (headless)`);
     }
   } else if (!headless) {
-    const launch = interactiveClaudeCmd(config, true).replace(/"/g, '\\"');
+    const launch = interactiveAgentCmd(config, true).replace(/"/g, '\\"');
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && ${launch}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "${prefix}${launch}" Enter`,
     );
     log.ok(`Resumed agent: ${id} (interactive)`);
     if (!noAttach) tmuxAttach(id, false);
   } else {
-    const resumePrompt = "Continue working on the task.";
-    const claudeCmd = buildClaudeCmd(
-      resumePrompt,
-      "headless",
-      wtPath,
-      config,
-      "--continue",
-    );
+    const agentCmd = buildAgentCmd(resumePrompt, "headless", wtPath, config, "", true);
     const logFile = join(wtPath, ".dispatch.log");
     execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "unset CLAUDECODE && ${claudeCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
+      `tmux send-keys -t "${tmuxTarget(id)}" "${prefix}${agentCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
     );
     log.ok(`Resumed agent: ${id} (headless)`);
   }
@@ -1203,11 +1184,13 @@ export function cmdPrune(args: string[], config: Config): void {
     if (!hasSession) {
       // No session at all — clearly stale
     } else if (includeIdle) {
-      // Check if the agent is actually idle (Claude exited, sitting at shell prompt)
+      // Check if the agent is actually idle (CLI exited, sitting at shell prompt)
       const capture = tmuxCapture(name, 5);
       const lines = capture.split("\n").filter((l) => l.trim());
       const lastLine = lines[lines.length - 1]?.trim() || "";
-      const isIdle = /[$%#]\s*$/.test(lastLine) && !/claude/i.test(lastLine);
+      const bin = getAdapter(readAgentMarker(worktreePath(name, config))).bin;
+      const isIdle =
+        /[$%#]\s*$/.test(lastLine) && !new RegExp(bin, "i").test(lastLine);
       if (!isIdle) continue;
     } else {
       continue; // session exists and we're not checking idle
@@ -1738,6 +1721,7 @@ dispatch run HEY-123                                  # From Linear ticket (auto
 dispatch run "Fix the auth bug" --name HEY-879        # Free text with custom branch name (hey-879)
 dispatch run HEY-123 --headless                       # Background — check with: dispatch logs HEY-123
 dispatch run HEY-123 --max-turns 20                   # Opus 5 with 20 turn limit
+dispatch run HEY-123 --agent codex                    # Run on Codex instead of Claude
 dispatch run HEY-123 HEY-124 HEY-125                 # Batch launch in parallel
 
 # Monitor and interact
@@ -1753,10 +1737,10 @@ dispatch cleanup --all --delete-branch                # Clean up everything
 dispatch prune --merged --delete-branch               # Remove worktrees with merged PRs
 \`\`\`
 
-**Key flags:** \`--name/-n\` sets branch name, \`--model/-m\` picks model (default: \`opus[1m]\`), \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev, \`--ask\` to re-enable permission prompts.
+**Key flags:** \`--name/-n\` sets branch name, \`--agent/-A\` picks the runtime (\`claude\` default, or \`codex\`), \`--model/-m\` picks model (default: \`opus[1m]\`), \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev, \`--ask\` to re-enable permission prompts.
 
-Config: \`~/.dispatch.yml\` (base_branch, model, max_turns, max_budget, permission_mode, worktree_dir, claude_timeout).
-Requires: tmux or cmux, claude CLI, git.
+Config: \`~/.dispatch.yml\` (base_branch, agent, model, max_turns, max_budget, permission_mode, worktree_dir, agent_timeout).
+Requires: tmux or cmux, the agent CLI (\`claude\` and/or \`codex\`), git.
 `;
 
 export function cmdSetup(): void {
@@ -1802,7 +1786,8 @@ Add options:
   --prompt-file <path>      Prompt file the agent runs (required unless --command)
   --command "<shell>"       Run a raw shell command instead of dispatch run
   --branch-prefix <str>     Branch name prefix (default: schedule name)
-  --model <m>               Claude model (default: opus[1m]; also opus|sonnet|haiku)
+  --agent <runtime>         Agent CLI: claude (default) or codex
+  --model <m>               Model for that runtime (claude default: opus[1m])
   --repo <path>             cd into this repo before invoking dispatch run
   --max-turns <n>           Forwarded to dispatch run --max-turns
   --notify none|notification|slack
@@ -1850,6 +1835,7 @@ export interface ScheduleAddArgs {
   prompt?: string;
   command?: string;
   branchPrefix?: string;
+  agent?: string;
   model?: string;
   repo?: string;
   maxTurns?: string;
@@ -1869,6 +1855,7 @@ export function parseScheduleAddArgs(args: string[]): ScheduleAddArgs {
       case "--prompt": out.prompt = args[++i]; break;
       case "--command": out.command = args[++i]; break;
       case "--branch-prefix": out.branchPrefix = args[++i]; break;
+      case "--agent": out.agent = args[++i]; break;
       case "--model": out.model = args[++i]; break;
       case "--repo": out.repo = args[++i]; break;
       case "--max-turns": out.maxTurns = args[++i]; break;
@@ -2017,6 +2004,7 @@ function scheduleAdd(args: string[]): void {
     prompt_b64: promptB64,
     command: parsed.command,
     branch_prefix: parsed.branchPrefix,
+    agent: parsed.agent,
     model: parsed.model,
     repo,
     max_turns: parsed.maxTurns,

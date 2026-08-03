@@ -56,7 +56,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "dispatch_run",
       description:
-        "Launch a Claude Code agent in an isolated git worktree. " +
+        "Launch a coding agent (Claude Code or Codex) in an isolated git worktree. " +
         "Pass the full task prompt inline. Returns agent ID and branch name. " +
         "Agents run headless by default (set max_turns to limit). " +
         "After launching, use dispatch_status to check progress.",
@@ -77,10 +77,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               "Agent name and branch name (kebab-case). Defaults to ticket ID or derived from prompt.",
           },
+          agent: {
+            type: "string",
+            enum: ["claude", "codex"],
+            description:
+              "Agent CLI to drive. Default: claude. Use codex to run the task on OpenAI Codex instead.",
+          },
           model: {
             type: "string",
             description:
-              "Claude model: opus[1m], opus, sonnet, haiku. Default: opus[1m] (Opus 5, 1M context).",
+              "Model for the selected runtime. claude: opus[1m] (default, Opus 5 1M context), opus, sonnet, haiku. codex: e.g. gpt-5.6-sol.",
           },
           base_branch: {
             type: "string",
@@ -220,6 +226,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         prompt,
         ticket,
         name: agentName,
+        agent,
         model,
         base_branch,
         max_turns,
@@ -232,6 +239,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         parts.push(ticket || "prompt-file");
         parts.push(`--prompt-file "${tmpFile}"`);
         if (agentName) parts.push(`--name "${agentName}"`);
+        if (agent) parts.push(`--agent ${agent}`);
         if (model) parts.push(modelFlag(String(model)));
         if (base_branch) parts.push(`--base ${base_branch}`);
         if (max_turns) parts.push(`--max-turns ${max_turns}`);

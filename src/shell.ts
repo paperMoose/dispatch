@@ -2,6 +2,7 @@ import { execSync, spawnSync, spawn, type ChildProcess } from "child_process";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync } from "fs";
 import { join, basename } from "path";
 import type { Config } from "./config.js";
+import { getAdapter, type AgentAdapter } from "./agents.js";
 import {
   isCmuxAvailable,
   cmuxNewWorkspace,
@@ -673,20 +674,27 @@ function getCmuxWorkspaceId(id: string): string | null {
 export { getCmuxWorkspaceId };
 
 // ---------------------------------------------------------------------------
-// Claude readiness
+// Agent readiness
 // ---------------------------------------------------------------------------
 
-/** True when terminal content shows the Claude TUI is rendered and ready for input.
- *  Markers chosen so they cannot match the typed launch command
- *  (`unset CLAUDECODE && claude --model …`) — the bare word "claude" is NOT a marker. */
+/** True when terminal content shows the Claude TUI is rendered and ready.
+ *  Kept as a named export for callers that only ever drive Claude. */
 export function isClaudeReady(content: string): boolean {
-  // Empty prompt indicators on their own line — old (`>`/`?`) and new (`❯`) TUIs.
-  if (/^\s*[>?❯]\s*$/m.test(content)) return true;
-  // Banner / footer / box-drawing fragments unique to the rendered TUI.
-  return /❯|Claude Code v\d|\? for shortcuts|╭─|▐▛|Welcome to Claude/.test(content);
+  return getAdapter("claude").isReady(content);
 }
 
-export function waitForClaude(id: string, timeout: number): void {
+/** Wait for an agent's TUI to be ready for input, dismissing any blocking
+ *  startup dialog (codex, for one, can open with an update menu that would
+ *  otherwise swallow the pasted prompt).
+ *
+ *  Returns false on timeout. Callers must not paste the prompt in that case:
+ *  if the CLI died at startup the pane is a live shell, and the prompt would
+ *  be executed line by line as commands. */
+export function waitForAgent(
+  id: string,
+  timeout: number,
+  adapter: AgentAdapter = getAdapter("claude"),
+): boolean {
   if (useCmux()) {
     const wsId = getCmuxWorkspaceId(id);
     if (wsId) cmuxSetStatus(wsId, "dispatch", "initializing", { color: "#F18F01" });
@@ -694,18 +702,36 @@ export function waitForClaude(id: string, timeout: number): void {
 
   let waited = 0;
   while (waited < timeout) {
-    const content = tmuxCapture(id, 5);
-    if (isClaudeReady(content)) {
+    // Wide enough to see a whole startup dialog: the question and its options
+    // can be a dozen lines apart, and a 5-line window only shows the options.
+    const content = tmuxCapture(id, 40);
+
+    // Readiness is checked first so dialog text still on screen above a
+    // painted composer cannot cause an endless re-dismissal loop.
+    if (adapter.isReady(content)) {
       if (useCmux()) {
         const wsId = getCmuxWorkspaceId(id);
         if (wsId) cmuxSetStatus(wsId, "dispatch", "running", { color: "#44BBA4" });
       }
-      return;
+      return true;
     }
+
+    const keys = adapter.dismissStartupDialog(content);
+    if (keys) {
+      log.dim(`  Dismissing ${adapter.bin} startup dialog`);
+      tmuxSendText(id, keys);
+      // cmuxSend types without submitting, unlike the tmux path.
+      if (useCmux()) {
+        const wsId = getCmuxWorkspaceId(id);
+        if (wsId) cmuxSendKey(wsId, "enter");
+      }
+    }
+
     spawnSync("sleep", ["1"]);
     waited++;
   }
-  log.warn(`Claude Code may not be fully initialized (waited ${timeout}s)`);
+  log.warn(`${adapter.bin} did not become ready (waited ${timeout}s)`);
+  return false;
 }
 
 // ---------------------------------------------------------------------------

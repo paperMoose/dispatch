@@ -377,6 +377,7 @@ export interface ScheduleMeta {
   prompt_b64?: string;
   command?: string;
   branch_prefix?: string;
+  agent?: string;
   model?: string;
   repo?: string;
   max_turns?: string;
@@ -393,6 +394,7 @@ const META_FIELDS: (keyof ScheduleMeta)[] = [
   "prompt_b64",
   "command",
   "branch_prefix",
+  "agent",
   "model",
   "repo",
   "max_turns",
