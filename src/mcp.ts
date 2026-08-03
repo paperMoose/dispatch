@@ -39,6 +39,11 @@ function dispatch(args: string): string {
   }
 }
 
+/** Single-quote a value for the shell, escaping embedded quotes. */
+function shellArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 function makeTempPrompt(prompt: string): string {
   const name = `dispatch-mcp-${randomBytes(4).toString("hex")}.md`;
   const path = join(tmpdir(), name);
@@ -83,6 +88,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               "Agent CLI to drive. Default: claude. Use codex to run the task on OpenAI Codex instead.",
           },
+          effort: {
+            type: "string",
+            enum: ["low", "medium", "high", "xhigh", "max", "ultra"],
+            description:
+              "Codex reasoning depth. Ignored for claude, which has no CLI equivalent.",
+          },
           model: {
             type: "string",
             description:
@@ -98,6 +109,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ["prompt"],
+      },
+    },
+    {
+      name: "dispatch_send",
+      description:
+        "Post a message to a running interactive agent — steer it, answer a question, or add context mid-task. " +
+        "Works the same whether the agent runs on Claude Code or Codex. " +
+        "Headless agents cannot receive messages; use dispatch_status to read their progress instead.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          agent_id: { type: "string", description: "Agent ID to message" },
+          message: {
+            type: "string",
+            description: "Text to send to the agent, as if typed into its terminal",
+          },
+        },
+        required: ["agent_id", "message"],
       },
     },
     {
@@ -227,6 +256,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ticket,
         name: agentName,
         agent,
+        effort,
         model,
         base_branch,
         max_turns,
@@ -240,6 +270,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         parts.push(`--prompt-file "${tmpFile}"`);
         if (agentName) parts.push(`--name "${agentName}"`);
         if (agent) parts.push(`--agent ${agent}`);
+        if (effort) parts.push(`--effort ${effort}`);
         if (model) parts.push(modelFlag(String(model)));
         if (base_branch) parts.push(`--base ${base_branch}`);
         if (max_turns) parts.push(`--max-turns ${max_turns}`);
@@ -250,6 +281,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           unlinkSync(tmpFile);
         } catch {}
+      }
+    }
+
+    case "dispatch_send": {
+      const { agent_id, message } = args as Record<string, any>;
+      const tmpFile = makeTempPrompt(String(message));
+      try {
+        // Route through a file so newlines and quotes survive the shell.
+        const output = dispatch(
+          `send ${shellArg(String(agent_id))} --message-file ${shellArg(tmpFile)}`,
+        );
+        return { content: [{ type: "text", text: output }] };
+      } finally {
+        try { unlinkSync(tmpFile); } catch {}
       }
     }
 

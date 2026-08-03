@@ -42,7 +42,7 @@ describe("MCP server", () => {
     assert.ok(init.result.capabilities.tools);
   });
 
-  it("lists all 8 tools", () => {
+  it("lists all 9 tools", () => {
     const responses = mcpCall([
       INIT_MSG,
       { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
@@ -57,9 +57,34 @@ describe("MCP server", () => {
       "dispatch_prune",
       "dispatch_resume",
       "dispatch_run",
+      "dispatch_send",
       "dispatch_status",
       "dispatch_stop",
     ]);
+  });
+
+  it("exposes agent runtime and reasoning effort on dispatch_run", () => {
+    const responses = mcpCall([
+      INIT_MSG,
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    ]);
+    const run = responses
+      .find((r) => r.id === 2)!
+      .result.tools.find((t: any) => t.name === "dispatch_run");
+    const props = run.inputSchema.properties;
+    assert.deepEqual(props.agent.enum, ["claude", "codex"]);
+    assert.ok(props.effort.enum.includes("xhigh"));
+  });
+
+  it("dispatch_send requires both an agent and a message", () => {
+    const responses = mcpCall([
+      INIT_MSG,
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    ]);
+    const send = responses
+      .find((r) => r.id === 2)!
+      .result.tools.find((t: any) => t.name === "dispatch_send");
+    assert.deepEqual(send.inputSchema.required.sort(), ["agent_id", "message"]);
   });
 
   it("dispatch_run tool has required prompt parameter", () => {

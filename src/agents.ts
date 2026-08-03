@@ -6,7 +6,8 @@
 // readiness markers, and log parsing. The rest of the codebase should never
 // name a specific CLI.
 // ---------------------------------------------------------------------------
-import { writeFileSync } from "fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs";
+import { homedir } from "os";
 import { basename, join } from "path";
 import { modelFlag, permissionModeFlag, type Config } from "./config.js";
 
@@ -71,6 +72,50 @@ export interface AgentAdapter {
 
   /** Parse this runtime's log stream into the shared summary shape. */
   parseLog(content: string): AgentLogSummary;
+
+  /** Path to the CLI's own session transcript for a worktree, or null.
+   *  Interactive agents write no .dispatch.log, so this is the only way an
+   *  orchestrator can see what an interactive agent is doing. */
+  findSessionFile(wtPath: string): string | null;
+
+  /** Parse that session transcript. Its shape differs from the headless
+   *  stream, so it gets its own parser. */
+  parseSession(content: string): AgentLogSummary;
+}
+
+/** Newest-first files under `dir`, recursing at most `depth` levels. Used to
+ *  locate session transcripts without walking an unbounded history. */
+function recentFiles(dir: string, match: RegExp, depth = 4, limit = 60): string[] {
+  const found: { path: string; mtime: number }[] = [];
+
+  const walk = (current: string, left: number): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(current);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(current, entry);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        if (left > 0) walk(full, left - 1);
+      } else if (match.test(entry)) {
+        found.push({ path: full, mtime: st.mtimeMs });
+      }
+    }
+  };
+
+  walk(dir, depth);
+  return found
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, limit)
+    .map((f) => f.path);
 }
 
 const MAX_ACTIONS = 8;
@@ -98,13 +143,19 @@ class SummaryBuilder {
     this.actions.push(text);
   }
 
-  /** Shared shell-command analysis. Both runtimes report the command verbatim,
-   *  so commit/push/PR detection is identical either side. */
-  shellCommand(command: string): void {
+  /** Shared shell-command analysis. Both runtimes report the command text, but
+   *  codex rollouts report argv arrays, where the commit message is a discrete
+   *  element and so carries no quotes once joined. Prefer argv when present. */
+  shellCommand(command: string, argv?: string[] | null): void {
     if (command.includes("git commit") || command.includes("git push")) {
-      const msg = command.match(/-m\s+["']([^"']+)["']/);
-      if (msg) {
-        this.commits.push(msg[1].slice(0, 100));
+      const argvMsg =
+        argv && argv.indexOf("-m") !== -1 ? argv[argv.indexOf("-m") + 1] : undefined;
+      const quoted = command.match(/-m\s+["']([^"']+)["']/);
+
+      if (argvMsg) {
+        this.commits.push(argvMsg.slice(0, 100));
+      } else if (quoted) {
+        this.commits.push(quoted[1].slice(0, 100));
       } else if (command.includes("git push")) {
         this.action("Pushed to remote");
       }
@@ -138,6 +189,33 @@ function eachJsonLine(content: string, fn: (obj: any) => void): void {
     }
     fn(obj);
   }
+}
+
+/** True when a transcript belongs to `wtPath`. Only the head of the file is
+ *  inspected: both runtimes record cwd early, and transcripts get large. */
+function sessionCwdMatches(
+  file: string,
+  wtPath: string,
+  extract: (obj: any) => string | undefined,
+): boolean {
+  let head: string;
+  try {
+    head = readFileSync(file, "utf-8").slice(0, 64_000);
+  } catch {
+    return false;
+  }
+  for (const line of head.split("\n")) {
+    if (!line.trim()) continue;
+    let obj: any;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const cwd = extract(obj);
+    if (cwd) return cwd === wtPath;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +283,30 @@ const claudeAdapter: AgentAdapter = {
     return null;
   },
 
+  // Claude Code writes one transcript per session under a directory derived
+  // from the cwd. Every line carries `cwd`, so match on that rather than
+  // trusting the directory-name escaping, which is undocumented.
+  findSessionFile(wtPath) {
+    const root = join(homedir(), ".claude", "projects");
+    if (!existsSync(root)) return null;
+
+    const guess = join(root, wtPath.replace(/[^a-zA-Z0-9]/g, "-"));
+    const candidates = existsSync(guess)
+      ? recentFiles(guess, /\.jsonl$/, 1)
+      : recentFiles(root, /\.jsonl$/, 2);
+
+    for (const file of candidates) {
+      if (sessionCwdMatches(file, wtPath, (obj) => obj.cwd)) return file;
+    }
+    return null;
+  },
+
+  // Session transcripts carry the same assistant/message shape as the
+  // headless stream, so the log parser handles them unchanged.
+  parseSession(content) {
+    return claudeAdapter.parseLog(content);
+  },
+
   parseLog(content) {
     const b = new SummaryBuilder();
 
@@ -268,6 +370,13 @@ function codexSandboxFlags(config: Config): string {
  *  meant for the composer, so suppress the check at the source. */
 const CODEX_NO_UPDATE_CHECK = "-c check_for_update_on_startup=false";
 
+/** Reasoning depth. Codex takes this as a config override rather than a flag.
+ *  Claude has no CLI equivalent, so the setting is codex-only. */
+function codexEffortFlag(config: Config): string {
+  if (!config.reasoningEffort) return "";
+  return `-c model_reasoning_effort=${config.reasoningEffort}`;
+}
+
 const codexAdapter: AgentAdapter = {
   kind: "codex",
   bin: "codex",
@@ -285,6 +394,8 @@ const codexAdapter: AgentAdapter = {
     }
 
     if (config.codexModel) parts.push(modelFlag(config.codexModel, "-m"));
+    const effort = codexEffortFlag(config);
+    if (effort) parts.push(effort);
     parts.push(codexSandboxFlags(config));
     // --search and the update-check override are TUI-only; `codex exec`
     // rejects them outright.
@@ -310,6 +421,8 @@ const codexAdapter: AgentAdapter = {
     const parts = ["codex"];
     if (resume) parts.push("resume", "--last");
     if (config.codexModel) parts.push(modelFlag(config.codexModel, "-m"));
+    const effort = codexEffortFlag(config);
+    if (effort) parts.push(effort);
     parts.push(codexSandboxFlags(config));
     parts.push("--search");
     parts.push(CODEX_NO_UPDATE_CHECK);
@@ -344,6 +457,79 @@ const codexAdapter: AgentAdapter = {
       return "2";
     }
     return null;
+  },
+
+  // Codex writes a rollout transcript per session, tagged with the cwd it ran
+  // in, so an interactive agent's activity is recoverable even though it
+  // produces no .dispatch.log.
+  findSessionFile(wtPath) {
+    const root = join(homedir(), ".codex", "sessions");
+    if (!existsSync(root)) return null;
+
+    // Sessions are bucketed YYYY/MM/DD, so depth 4 covers the date tree.
+    for (const file of recentFiles(root, /^rollout-.*\.jsonl$/, 4)) {
+      const matches = sessionCwdMatches(file, wtPath, (obj) =>
+        obj.type === "session_meta" ? obj.payload?.cwd : undefined,
+      );
+      if (matches) return file;
+    }
+    return null;
+  },
+
+  // The rollout format is not the `exec --json` format: activity arrives as
+  // event_msg/response_item envelopes rather than item.completed.
+  parseSession(content) {
+    const b = new SummaryBuilder();
+
+    eachJsonLine(content, (obj) => {
+      const payload = obj.payload;
+      if (!payload) return;
+
+      if (obj.type === "event_msg") {
+        switch (payload.type) {
+          case "agent_message":
+            b.turns++;
+            if (payload.message) b.lastText = payload.message;
+            break;
+          case "task_complete":
+            // Authoritative final answer for the turn.
+            if (payload.last_agent_message) b.lastText = payload.last_agent_message;
+            break;
+          case "patch_apply_begin":
+            for (const path of Object.keys(payload.changes || {})) {
+              b.file(path);
+              b.tool("Edit");
+              b.action(`Edited ${basename(path)}`);
+            }
+            break;
+          case "exec_command_begin": {
+            const argv = Array.isArray(payload.command) ? payload.command : null;
+            const cmd = argv ? argv.join(" ") : payload.command;
+            if (typeof cmd === "string") {
+              b.tool("Bash");
+              b.shellCommand(cmd, argv);
+            }
+            break;
+          }
+        }
+        return;
+      }
+
+      if (obj.type === "response_item" && payload.type === "custom_tool_call") {
+        // Newer codex builds route shell work through a code-mode `exec` tool
+        // whose input is JS, not a command string. Recover the command when
+        // it is a plain literal, and fall back to naming the tool when it is
+        // not — better a coarse action than a wrong one.
+        b.tool(payload.name === "exec" ? "Bash" : payload.name || "tool");
+        const literal = String(payload.input || "").match(
+          /exec_command\(\s*\{[^}]*?command:\s*(["'`])([\s\S]*?)\1/,
+        );
+        if (literal) b.shellCommand(literal[2]);
+        else if (payload.name) b.action(`Ran ${payload.name}`);
+      }
+    });
+
+    return b.build();
   },
 
   parseLog(content) {

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { join, basename, dirname, resolve } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 import { execSync, spawnSync } from "child_process";
 import { type Config } from "./config.js";
 import {
@@ -407,6 +407,10 @@ export async function cmdRun(
         // Applied after the loop: which runtime it belongs to depends on
         // --agent, which may appear either side of it.
         modelOverride = args[++i];
+        i++;
+        break;
+      case "--effort":
+        config.reasoningEffort = args[++i];
         i++;
         break;
       case "--agent":
@@ -840,6 +844,129 @@ export function formatStatus(
   return lines.join("\n");
 }
 
+/** Best available structured trace for an agent, whichever harness it runs on.
+ *  Headless agents tee a .dispatch.log; interactive agents write nothing, so
+ *  fall back to the CLI's own session transcript. Without this an orchestrator
+ *  is blind to exactly the mode dispatch runs by default. */
+export function readAgentTrace(
+  wtPath: string,
+  agent: string,
+): { parsed: AgentLogSummary; source: "log" | "session" } | null {
+  const adapter = getAdapter(agent);
+
+  const logFile = join(wtPath, ".dispatch.log");
+  if (existsSync(logFile)) {
+    try {
+      return {
+        parsed: adapter.parseLog(readFileSync(logFile, "utf-8")),
+        source: "log",
+      };
+    } catch {
+      // Fall through to the session transcript.
+    }
+  }
+
+  const sessionFile = adapter.findSessionFile(wtPath);
+  if (sessionFile) {
+    try {
+      return {
+        parsed: adapter.parseSession(readFileSync(sessionFile, "utf-8")),
+        source: "session",
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/** Type text into a running agent's TUI and submit it. This is how the initial
+ *  prompt is delivered, and how `dispatch send` posts follow-up messages to an
+ *  agent that is already working. */
+function sendToPane(id: string, text: string): void {
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(id);
+    if (!wsId) throw new Error(`No cmux workspace for agent '${id}'`);
+    // Collapse newlines: every TUI treats Enter as submit, so a multi-line
+    // paste would fragment into several separate messages.
+    cmuxSend(wsId, text.replace(/\n+/g, " "));
+    spawnSync("sleep", ["3"]);
+    cmuxSendKey(wsId, "enter");
+    return;
+  }
+
+  // tmux pastes via a buffer, which preserves the text verbatim.
+  const bufName = `dispatch-${id.replace(/[^a-zA-Z0-9]/g, "-")}`;
+  const tmp = join(tmpdir(), `${bufName}.txt`);
+  writeFileSync(tmp, text);
+  try {
+    execSync(`tmux load-buffer -b "${bufName}" "${tmp}"`);
+    execSync(`tmux paste-buffer -b "${bufName}" -t "${tmuxTarget(id)}"`);
+    execQuiet(`tmux delete-buffer -b "${bufName}"`);
+    spawnSync("sleep", ["3"]);
+    execSync(`tmux send-keys -t "${tmuxTarget(id)}" Enter`);
+  } finally {
+    try { unlinkSync(tmp); } catch {}
+  }
+}
+
+export function cmdSend(args: string[], config: Config): void {
+  const id = args[0];
+
+  // --message-file keeps quotes and newlines out of the shell entirely, which
+  // is how the MCP layer passes arbitrary text through safely.
+  let message: string;
+  const fileIdx = args.indexOf("--message-file");
+  if (fileIdx !== -1) {
+    const path = args[fileIdx + 1];
+    if (!path || !existsSync(path)) {
+      log.error(`Message file not found: ${path}`);
+      process.exit(1);
+    }
+    message = readFileSync(path, "utf-8").trim();
+  } else {
+    message = args.slice(1).join(" ");
+  }
+
+  if (!id || !message) {
+    log.error('Usage: dispatch send <agent-id> "<message>"');
+    log.dim("       dispatch send <agent-id> --message-file <path>");
+    process.exit(1);
+  }
+
+  if (!sessionExists(id)) {
+    log.error(`Agent '${id}' is not running. Use 'dispatch resume ${id}' first.`);
+    process.exit(1);
+  }
+
+  const wtPath = worktreePath(id, config);
+  // A headless agent reads its prompt from a file and never watches the pane,
+  // so typing at it would land in whatever shell follows the run.
+  if (existsSync(join(wtPath, ".dispatch.log"))) {
+    log.error(`Agent '${id}' is headless — it cannot receive messages.`);
+    log.dim(`  Stop it and resume interactively to steer it: dispatch resume ${id}`);
+    process.exit(1);
+  }
+
+  const adapter = getAdapter(readAgentMarker(wtPath, config.agent));
+  const screen = tmuxCapture(id, 40);
+  if (adapter.isBusy(screen)) {
+    log.warn(`${adapter.bin} is mid-turn — the message will queue until it finishes`);
+  }
+
+  sendToPane(id, message);
+  log.ok(`Sent to ${fmt.BOLD}${id}${fmt.NC}`);
+  log.dim(`  ${message.slice(0, 120)}`);
+
+  recordEvent({
+    id,
+    event: "message-sent",
+    ts: new Date().toISOString(),
+    prompt: message.slice(0, 200),
+  });
+}
+
 export function cmdStatus(args: string[], config: Config): void {
   const id = args[0];
   if (!id) {
@@ -874,15 +1001,15 @@ export function cmdStatus(args: string[], config: Config): void {
     agentStatus = hist.status;
   }
 
-  // Try log file first
-  if (existsSync(logFile)) {
-    const content = readFileSync(logFile, "utf-8");
-    const parsed = parseAgentLog(content, readAgentMarker(wtPath, config.agent));
+  const trace = readAgentTrace(wtPath, readAgentMarker(wtPath, config.agent));
+  if (trace) {
     const pr = getPrInfo(id);
-
-    const output = formatStatus(id, agentStatus, parsed, pr);
+    const output = formatStatus(id, agentStatus, trace.parsed, pr);
     console.log();
     console.log(output);
+    if (trace.source === "session") {
+      log.dim("  (from the agent CLI's session transcript — interactive mode)");
+    }
     console.log();
     return;
   }
@@ -1728,6 +1855,8 @@ dispatch run HEY-123 HEY-124 HEY-125                 # Batch launch in parallel
 dispatch list                                         # Status: green=running, yellow=idle, red=exited
 dispatch attach HEY-123                               # Jump to agent's terminal (auto-opens tab if no TTY)
 dispatch logs HEY-123                                 # Tail headless agent output
+dispatch status HEY-123                               # Structured trace (works for interactive too)
+dispatch send HEY-123 "use the existing helper"       # Steer a running interactive agent
 
 # Lifecycle
 dispatch stop HEY-123                                 # Interrupt agent (worktree preserved)

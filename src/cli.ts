@@ -20,6 +20,7 @@ import {
   cmdSetup,
   cmdHistory,
   cmdStatus,
+  cmdSend,
   cmdSchedule,
   cmdScheduleShouldFire,
   cmdScheduleRecordSuccess,
@@ -45,6 +46,7 @@ Commands:
   dispatch list                            Show all running agents with status
   dispatch status <id>                     Structured summary: turns, files, commits, last actions
   dispatch logs <id>                       Tail a headless agent's output
+  dispatch send <id> "<msg>"               Post a message to a running interactive agent
   dispatch stop <id>                       Send Ctrl-C and kill the tmux window
   dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
@@ -61,6 +63,7 @@ Commands:
 Run Options:
   --headless, -H            Fire-and-forget mode (no interactive terminal)
   --agent, -A <runtime>     Agent CLI to drive: claude, codex (default: claude)
+  --effort <level>          Codex reasoning: low|medium|high|xhigh|max|ultra
   --model, -m <model>       Model for that runtime. Claude: 'opus[1m]', opus, sonnet,
                             haiku (default: opus[1m]). Codex: gpt-5.6-sol, etc.
   --name, -n <name>         Set agent name and branch (default: ticket ID or task-{random})
@@ -109,13 +112,17 @@ Environment:
   DISPATCH_BASE_BRANCH   Default base branch (default: dev)
   DISPATCH_AGENT         Default agent runtime: claude or codex (default: claude)
   DISPATCH_MODEL         Default model (default: opus[1m])
+  DISPATCH_CODEX_MODEL   Default model when --agent codex (default: codex's own)
+  DISPATCH_REASONING_EFFORT  Codex reasoning effort (default: codex's own)
   DISPATCH_PERMISSION_MODE  Permission mode for agents (default: dontAsk; "" for prompts)
   DISPATCH_CONFIG        Config file path (default: ~/.dispatch.yml)
 
 Config (~/.dispatch.yml):
   base_branch: dev        # Branch to create worktrees from
   agent: claude           # Agent runtime: claude or codex
-  model: opus[1m]         # Default model for that runtime
+  model: opus[1m]         # Model when agent is claude
+  codex_model: gpt-5.6-sol  # Model when agent is codex
+  reasoning_effort: xhigh   # Codex reasoning depth
   permission_mode: dontAsk  # Agents don't stop for permission prompts
   max_turns: 20           # Default max turns for headless
   agent_timeout: 30       # Seconds to wait for the agent TUI to start
@@ -178,6 +185,9 @@ async function main(): Promise<void> {
       break;
     case "status":
       cmdStatus(rest, config);
+      break;
+    case "send":
+      cmdSend(rest, config);
       break;
     case "history":
       cmdHistory(rest);

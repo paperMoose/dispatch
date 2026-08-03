@@ -11,6 +11,9 @@ export interface Config {
   /** Model for the codex runtime. Empty means "use codex's own default",
    *  since model names are not portable between runtimes. */
   codexModel: string;
+  /** Codex reasoning effort: low | medium | high | xhigh | max | ultra.
+   *  Empty means "use codex's own default". Claude has no CLI equivalent. */
+  reasoningEffort: string;
   maxTurns: string;
   maxBudget: string;
   allowedTools: string;
@@ -24,6 +27,7 @@ const DEFAULTS: Config = {
   agent: "claude",
   model: "opus[1m]",
   codexModel: "",
+  reasoningEffort: "",
   maxTurns: "",
   maxBudget: "",
   allowedTools:
@@ -40,6 +44,7 @@ const KEY_MAP: Record<string, keyof Config> = {
   agent: "agent",
   model: "model",
   codex_model: "codexModel",
+  reasoning_effort: "reasoningEffort",
   max_turns: "maxTurns",
   max_budget: "maxBudget",
   allowed_tools: "allowedTools",
@@ -97,6 +102,7 @@ export function loadConfig(cliOverrides?: Partial<Config>): Config {
     ["DISPATCH_AGENT", "agent"],
     ["DISPATCH_MODEL", "model"],
     ["DISPATCH_CODEX_MODEL", "codexModel"],
+    ["DISPATCH_REASONING_EFFORT", "reasoningEffort"],
     ["DISPATCH_MAX_TURNS", "maxTurns"],
     ["DISPATCH_MAX_BUDGET", "maxBudget"],
     ["DISPATCH_ALLOWED_TOOLS", "allowedTools"],

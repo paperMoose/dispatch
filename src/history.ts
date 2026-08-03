@@ -6,7 +6,7 @@ const HISTORY_FILE = ".dispatch-history.jsonl";
 
 export interface HistoryEvent {
   id: string;
-  event: "launched" | "completed" | "stopped" | "cleaned";
+  event: "launched" | "completed" | "stopped" | "cleaned" | "message-sent";
   ts: string;
   prompt?: string;
   branch?: string;
@@ -71,15 +71,25 @@ export function getAgentSummaries(): AgentSummary[] {
   const agents = new Map<string, AgentSummary>();
 
   for (const e of events) {
+    // Messages sent to a running agent are recorded for auditability, but they
+    // are not lifecycle transitions: they must not become the agent's status,
+    // and they must not overwrite the prompt it was launched with.
+    const isLifecycle = e.event !== "message-sent";
+
     let agent = agents.get(e.id);
     if (!agent) {
-      agent = { id: e.id, status: e.event };
+      agent = {
+        id: e.id,
+        status: isLifecycle
+          ? (e.event as AgentSummary["status"])
+          : "launched",
+      };
       agents.set(e.id, agent);
     }
 
-    agent.status = e.event;
+    if (isLifecycle) agent.status = e.event as AgentSummary["status"];
     if (e.branch) agent.branch = e.branch;
-    if (e.prompt) agent.prompt = e.prompt;
+    if (e.prompt && isLifecycle) agent.prompt = e.prompt;
     if (e.mode) agent.mode = e.mode;
     if (e.summary) agent.summary = e.summary;
     if (e.pr) agent.pr = e.pr;

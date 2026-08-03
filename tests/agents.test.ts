@@ -12,6 +12,7 @@ function makeConfig(overrides?: Partial<Config>): Config {
     agent: "claude",
     model: "",
     codexModel: "",
+    reasoningEffort: "",
     maxTurns: "",
     maxBudget: "",
     allowedTools: "Bash,Read,Write,Edit,Glob,Grep,Task,WebSearch,WebFetch",
@@ -225,6 +226,37 @@ describe("codex adapter launch lines", () => {
   });
 });
 
+describe("codex reasoning effort", () => {
+  const codex = getAdapter("codex");
+
+  it("passes effort as a config override on both modes", () => {
+    const config = makeConfig({ agent: "codex", reasoningEffort: "xhigh" });
+    assert.ok(
+      codex.paneCmd(config, false).includes("-c model_reasoning_effort=xhigh"),
+    );
+    assert.ok(
+      codex
+        .runCmd("p", "headless", wt(), config, "", false)
+        .includes("-c model_reasoning_effort=xhigh"),
+    );
+  });
+
+  it("omits it when unset so codex uses its own default", () => {
+    assert.ok(
+      !codex.paneCmd(makeConfig({ agent: "codex" }), false).includes("model_reasoning_effort"),
+    );
+  });
+
+  it("claude ignores it — there is no CLI equivalent", () => {
+    const cmd = getAdapter("claude").paneCmd(
+      makeConfig({ reasoningEffort: "xhigh" }),
+      false,
+    );
+    assert.ok(!cmd.includes("reasoning"));
+    assert.ok(!cmd.includes("xhigh"));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // TUI detection. Fixtures are real pane captures from codex-cli 0.144.3.
 // ---------------------------------------------------------------------------
@@ -347,5 +379,68 @@ describe("both runtimes produce the same summary shape", () => {
     assert.deepEqual(fromCodex.commits, fromClaude.commits);
     assert.equal(fromCodex.lastText, fromClaude.lastText);
     assert.deepEqual(Object.keys(fromCodex), Object.keys(fromClaude));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session transcripts. Interactive agents write no .dispatch.log, so these are
+// the only trace an orchestrator can read. Fixtures are real rollout/session
+// lines from codex-cli 0.144.3 and Claude Code.
+// ---------------------------------------------------------------------------
+const CODEX_ROLLOUT = [
+  `{"type":"session_meta","payload":{"session_id":"019f","cwd":"/wt/agent-a","originator":"codex-tui"}}`,
+  `{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`,
+  `{"type":"event_msg","payload":{"type":"user_message","message":"do the thing"}}`,
+  `{"type":"event_msg","payload":{"type":"agent_message","message":"Starting on it."}}`,
+  `{"type":"event_msg","payload":{"type":"exec_command_begin","command":["git","commit","-m","add probe"]}}`,
+  `{"type":"event_msg","payload":{"type":"patch_apply_begin","changes":{"/wt/agent-a/hello.txt":{"add":{}}}}}`,
+  `{"type":"event_msg","payload":{"type":"agent_message","message":"Committed."}}`,
+  `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Current branch: codex-smoke"}}`,
+].join("\n");
+
+describe("codex session transcript parsing", () => {
+  const parsed = getAdapter("codex").parseSession(CODEX_ROLLOUT);
+
+  it("counts agent messages as turns", () => {
+    assert.equal(parsed.turns, 2);
+  });
+
+  it("prefers task_complete's final message as the last output", () => {
+    assert.equal(parsed.lastText, "Current branch: codex-smoke");
+  });
+
+  it("extracts commits from exec_command_begin arrays", () => {
+    assert.deepEqual(parsed.commits, ["add probe"]);
+  });
+
+  it("extracts changed files from patch_apply_begin", () => {
+    assert.deepEqual(parsed.filesModified, ["/wt/agent-a/hello.txt"]);
+  });
+
+  it("is a different shape from the exec --json stream", () => {
+    // Guards against someone pointing parseLog at a rollout file.
+    assert.equal(getAdapter("codex").parseLog(CODEX_ROLLOUT).turns, 0);
+  });
+});
+
+describe("claude session transcript parsing", () => {
+  it("reuses the headless parser, since the shape matches", () => {
+    const session = [
+      `{"type":"assistant","cwd":"/wt/agent-b","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}`,
+      `{"type":"assistant","cwd":"/wt/agent-b","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/wt/agent-b/x.ts"}}]}}`,
+      `{"type":"assistant","cwd":"/wt/agent-b","message":{"content":[{"type":"text","text":"Done."}]}}`,
+    ].join("\n");
+    const parsed = getAdapter("claude").parseSession(session);
+    assert.equal(parsed.turns, 3);
+    assert.equal(parsed.lastText, "Done.");
+    assert.deepEqual(parsed.filesModified, ["/wt/agent-b/x.ts"]);
+  });
+});
+
+describe("session file discovery", () => {
+  it("returns null rather than guessing when nothing matches the worktree", () => {
+    for (const kind of AGENT_KINDS) {
+      assert.equal(getAdapter(kind).findSessionFile("/nonexistent/worktree-xyz"), null);
+    }
   });
 });

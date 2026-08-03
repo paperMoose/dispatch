@@ -117,7 +117,10 @@ dispatch run HEY-837 --model sonnet --max-turns 10 --base main
 
 # Run on Codex instead of Claude Code
 dispatch run HEY-837 --agent codex
-dispatch run HEY-837 -A codex -m gpt-5.6-sol
+dispatch run HEY-837 -A codex -m gpt-5.6-sol --effort xhigh
+
+# Steer a running interactive agent without restarting it
+dispatch send HEY-837 "Use the existing helper rather than writing a new one"
 
 # Keep permission prompts on for this agent (they're off by default)
 dispatch run HEY-837 --ask
@@ -145,6 +148,17 @@ otherwise stops to ask whether it trusts the (brand new) worktree directory befo
 
 The runtime is recorded in the worktree at launch, so `status`, `logs`, and `resume` keep driving
 the CLI the agent actually started with even if you change your config afterwards.
+
+### Seeing what an agent is doing
+
+`dispatch status` returns a structured trace — turns, files changed, commits, recent actions, last
+output — for **both** modes. Headless agents tee a `.dispatch.log`; interactive agents write no log,
+so dispatch falls back to the agent CLI's own session transcript (`~/.claude/projects/...` or
+`~/.codex/sessions/...`), matched to the worktree. Same output shape either way, so an orchestrator
+does not need to know which harness an agent runs on.
+
+Codex routes shell work through a code-mode tool, so its traces show a coarser `Ran exec` where
+Claude resolves the actual command. Turns, files, commits and last message are reliable on both.
 
 The tradeoff: inside its worktree, an agent can push, merge PRs, run migrations, and hit cloud CLIs
 without asking. Use `--ask` when you'd rather approve those, or set `permission_mode: ""` in
