@@ -142,6 +142,7 @@ otherwise stops to ask whether it trusts the (brand new) worktree directory befo
 |---|---|---|
 | Model flag | `--model opus[1m]` | `-m gpt-5.6-sol` |
 | Model config key | `model:` | `codex_model:` |
+| Selected by | `--model opus` implies this runtime | `--model gpt-5.6-sol` implies this runtime |
 | Reasoning depth | not exposed | `--effort` / `reasoning_effort:` |
 | Resume | `claude --continue` | `codex resume --last` |
 | Headless | `claude -p --output-format stream-json` | `codex exec --json` |

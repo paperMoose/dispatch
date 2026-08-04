@@ -424,6 +424,9 @@ export async function cmdRun(
   let noAsk = true;
   let noAttach = false;
   let modelOverride = "";
+  // Tracks whether --agent was typed, so an explicit pairing is never silently
+  // overridden by the model's implied runtime.
+  let agentExplicit = false;
 
   let i = 0;
   while (i < args.length) {
@@ -455,6 +458,7 @@ export async function cmdRun(
           process.exit(1);
         }
         config.agent = kind;
+        agentExplicit = true;
         i++;
         break;
       }
@@ -512,15 +516,20 @@ export async function cmdRun(
   }
 
   if (modelOverride) {
-    // Models are not portable between runtimes, and the failure is silent:
-    // codex rejects a Claude model with a 400 as soon as the prompt lands, so
-    // the agent reads as "never started" rather than "wrong model".
+    // A model name implies its runtime. Naming a model is a clearer statement
+    // of intent than a config default, so follow it rather than pairing the
+    // two into something the runtime cannot serve: `codex -m opus` is rejected
+    // with a 400 the moment the prompt lands, and the agent then reads as one
+    // that never started.
     const owner = modelRuntime(modelOverride);
-    if (owner && owner !== config.agent) {
-      log.error(`'${modelOverride}' is a ${owner} model, but this run uses ${config.agent}.`);
-      log.dim(`  Run it on ${owner}:  --agent ${owner} --model ${modelOverride}`);
-      log.dim(`  Or pick a ${config.agent} model instead.`);
-      log.dim(`  The runtime default comes from ~/.dispatch.yml (agent: ${config.agent}).`);
+    if (owner && owner !== config.agent && !agentExplicit) {
+      log.info(`Using ${owner} — ${modelOverride} is a ${owner} model`);
+      config.agent = owner;
+    } else if (owner && owner !== config.agent && agentExplicit) {
+      // Both were given explicitly and they disagree; guessing either way
+      // would override something the operator typed.
+      log.error(`--agent ${config.agent} cannot run ${modelOverride}, which is a ${owner} model.`);
+      log.dim(`  Drop --agent to let the model choose, or pick a ${config.agent} model.`);
       process.exit(1);
     }
     config[getAdapter(config.agent).modelKey] = modelOverride;

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { getAdapter, isAgentKind, AGENT_KINDS } from "../src/agents.js";
+import { getAdapter, isAgentKind, modelRuntime, AGENT_KINDS } from "../src/agents.js";
 import type { Config } from "../src/config.js";
 
 function makeConfig(overrides?: Partial<Config>): Config {
@@ -534,5 +534,30 @@ describe("failed runs are visible, not silent", () => {
     assert.equal(parsed.turns, 0);
     assert.equal(parsed.lastText, "");
     assert.deepEqual(parsed.lastActions, []);
+  });
+});
+
+describe("modelRuntime", () => {
+  // Naming a model is a clearer statement of intent than a config default, so
+  // dispatch follows the model rather than pairing it with a runtime that
+  // cannot serve it. `codex -m opus` returns a 400 as the prompt lands.
+  it("recognises claude models", () => {
+    for (const m of ["opus", "opus[1m]", "sonnet", "haiku", "claude-sonnet-4-6"]) {
+      assert.equal(modelRuntime(m), "claude", m);
+    }
+  });
+
+  it("recognises codex models", () => {
+    for (const m of ["gpt-5.6-sol", "gpt-5.4-mini", "o3", "codex-mini"]) {
+      assert.equal(modelRuntime(m), "codex", m);
+    }
+  });
+
+  it("returns null for anything it cannot place", () => {
+    // An unknown name must pass through to the selected runtime rather than
+    // being guessed into the wrong one.
+    for (const m of ["", "my-finetune", "llama-3", "some/local-model"]) {
+      assert.equal(modelRuntime(m), null, m);
+    }
   });
 });

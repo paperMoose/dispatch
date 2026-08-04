@@ -64,8 +64,9 @@ Run Options:
   --headless, -H            Fire-and-forget mode (no interactive terminal)
   --agent, -A <runtime>     Agent CLI to drive: claude, codex (default: claude)
   --effort <level>          Codex reasoning: low|medium|high|xhigh|max|ultra
-  --model, -m <model>       Model for that runtime. Claude: 'opus[1m]', opus, sonnet,
-                            haiku (default: opus[1m]). Codex: gpt-5.6-sol, etc.
+  --model, -m <model>       Model to run. Selects the runtime when the name
+                            identifies one: opus/sonnet/haiku pick claude,
+                            gpt-*/o* pick codex. --agent overrides.
   --name, -n <name>         Set agent name and branch (default: ticket ID or task-{random})
   --max-turns <n>           Limit agentic turns before stopping (headless only)
   --max-budget <usd>        Cap spending in USD (headless only)

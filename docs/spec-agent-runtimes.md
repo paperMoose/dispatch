@@ -16,8 +16,13 @@ sessions are managed.
 
 ## Locked decisions
 
-1. **Explicit `--agent` flag.** No inference from model names. `--model` stays
-   orthogonal and is passed through to whichever CLI is selected.
+1. ~~**Explicit `--agent` flag.** No inference from model names.~~ **Reversed
+   2026-08-04.** `--model` now selects the runtime when the model name clearly
+   belongs to one, because the orthogonal version produced a silent failure:
+   with `agent: codex` configured, `-m opus` built `codex -m opus`, which codex
+   rejects with a 400 as the prompt lands. The agent then looks like one that
+   never started. `--agent` still wins when typed explicitly, and a typed
+   `--agent` that contradicts the model is refused rather than guessed.
 2. **Interactive is the default and primary path for both runtimes.** A human
    needs to be able to steer a dispatched ticket mid-run. Headless is supported
    for both, but interactive is what has to work first.
