@@ -654,3 +654,53 @@ describe("resolveRuntime", () => {
     }
   });
 });
+
+describe("parser accuracy against real transcript shapes", () => {
+  const claude = getAdapter("claude");
+  const codex = getAdapter("codex");
+
+  // Claude emits one `assistant` record per content BLOCK, all sharing a
+  // message id. Counting records reported 2-5x the CLI's own num_turns.
+  it("counts one turn per message, not per content block", () => {
+    const log = [
+      `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"a"}]}}`,
+      `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`,
+      `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"b"}]}}`,
+      `{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"c"}]}}`,
+    ].join("\n");
+    assert.equal(claude.parseLog(log).turns, 2);
+  });
+
+  it("prefers the runtime's own reported turn count", () => {
+    const log = [
+      `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"a"}]}}`,
+      `{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"b"}]}}`,
+      `{"type":"result","num_turns":7}`,
+    ].join("\n");
+    assert.equal(claude.parseLog(log).turns, 7);
+  });
+
+  // `git commit -m "$(cat <<'EOF' … )"` is the form Claude Code is instructed
+  // to use; 14% of extracted messages were the literal `$(cat <<`.
+  it("extracts a heredoc commit message, not the shell fragment", () => {
+    const cmd = `git commit -m "$(cat <<'EOF'\nfix: the real subject\n\nbody\nEOF\n)"`;
+    const log = `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Bash","input":{"command":${JSON.stringify(cmd)}}}]}}`;
+    assert.deepEqual(claude.parseLog(log).commits, ["fix: the real subject"]);
+  });
+
+  // Some codex builds report shell work as function_call/arguments rather than
+  // custom_tool_call/input; 330 commands were dropped across real rollouts.
+  it("parses codex function_call shell events", () => {
+    const rollout = `{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"git commit -m 'add thing'\\"}"}}`;
+    const parsed = codex.parseSession(rollout);
+    assert.equal(parsed.toolsUsed.get("Bash"), 1);
+    assert.deepEqual(parsed.commits, ["add thing"]);
+  });
+
+  // The dialog text lingers in scrollback, and an agent displaying dispatch's
+  // own docs quotes it. Answering a painted composer types a stray key.
+  it("never reports a dialog while the composer is painted", () => {
+    const painted = ">_ OpenAI Codex (v0.144.3)\nDo you trust the contents of this directory?\n1. Yes, continue";
+    assert.equal(codex.dismissStartupDialog(painted), null);
+  });
+});

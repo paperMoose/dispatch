@@ -217,12 +217,23 @@ const MAX_ACTIONS = 8;
 /** Accumulates the shared summary while each runtime's parser walks its own
  *  event shape. Keeps the ring-buffer and de-duplication rules in one place. */
 class SummaryBuilder {
-  turns = 0;
   lastText = "";
+  /** Authoritative count when the runtime reports one. */
+  reportedTurns: number | null = null;
+  private messageIds = new Set<string>();
+  private anonymousTurns = 0;
   private files = new Set<string>();
   private tools = new Map<string, number>();
   private commits: string[] = [];
   private actions: string[] = [];
+
+  /** Count a turn. Claude emits one `assistant` record per content block, all
+   *  sharing a message id, so counting records reported 2-5x the real number
+   *  against the CLI's own `result.num_turns`. */
+  turn(messageId?: string): void {
+    if (messageId) this.messageIds.add(messageId);
+    else this.anonymousTurns++;
+  }
 
   tool(name: string): void {
     this.tools.set(name, (this.tools.get(name) || 0) + 1);
@@ -248,7 +259,12 @@ class SummaryBuilder {
       const mIdx = argv ? argv.indexOf("-m", gitIdx) : -1;
       const argvMsg =
         argv && gitIdx !== -1 && mIdx > gitIdx ? argv[mIdx + 1] : undefined;
-      const quoted = command.match(/-m\s+["']([^"']+)["']/);
+      // `git commit -m "$(cat <<'EOF' … EOF)"` is the form Claude Code is told
+      // to use; a naive quoted match returns the literal `$(cat <<`.
+      const heredoc = command.match(/<<\s*'?(\w+)'?\n([\s\S]*?)\n\s*\1/);
+      const quoted = heredoc
+        ? ([null, heredoc[2].split("\n")[0]] as unknown as RegExpMatchArray)
+        : command.match(/-m\s+["']([^"']*[^"'$(\s][^"']*)["']/);
 
       if (argvMsg) {
         this.commits.push(argvMsg.slice(0, 100));
@@ -264,7 +280,9 @@ class SummaryBuilder {
 
   build(): AgentLogSummary {
     return {
-      turns: this.turns,
+      turns:
+        this.reportedTurns ??
+        (this.messageIds.size || this.anonymousTurns),
       filesModified: Array.from(this.files),
       toolsUsed: this.tools,
       commits: this.commits,
@@ -383,17 +401,25 @@ const claudeAdapter: AgentAdapter = {
 
   // Markers chosen so they cannot match the typed launch command
   // (`unset CLAUDECODE && claude --model …`) — bare "claude" is NOT a marker.
+  // Only markers the TUI itself paints. A bare prompt character is not one:
+  // `❯` is the default prompt char for pure, starship and powerlevel10k, so
+  // matching it reported "ready" for a pane sitting at a dead shell, and the
+  // prompt was then pasted there and executed line by line.
   isReady(content) {
-    // Empty prompt indicators on their own line — old (`>`/`?`) and new (`❯`).
-    if (/^\s*[>?❯]\s*$/m.test(content)) return true;
-    return /❯|Claude Code v\d|\? for shortcuts|╭─|▐▛|Welcome to Claude/.test(content);
+    return /Claude Code v\d|\? for shortcuts|▐▛|Welcome to Claude/.test(content);
   },
 
   isBusy(content) {
     return /esc to interrupt/i.test(content);
   },
 
-  dismissStartupDialog() {
+  dismissStartupDialog(content) {
+    if (
+      /Do you trust the files in this folder\?|trust the files in this folder/i.test(content) &&
+      /1\.\s*Yes/i.test(content)
+    ) {
+      return "1";
+    }
     return null;
   },
 
@@ -425,8 +451,12 @@ const claudeAdapter: AgentAdapter = {
     const b = new SummaryBuilder();
 
     eachJsonLine(content, (obj) => {
+      if (obj.type === "result" && typeof obj.num_turns === "number") {
+        b.reportedTurns = obj.num_turns;
+        return;
+      }
       if (obj.type !== "assistant") return;
-      b.turns++;
+      b.turn(obj.message?.id);
 
       const blocks = obj.message?.content;
       if (!Array.isArray(blocks)) return;
@@ -578,6 +608,9 @@ const codexAdapter: AgentAdapter = {
   },
 
   dismissStartupDialog(content) {
+    // Never while the composer is painted: the dialog text lingers in
+    // scrollback, and an agent displaying dispatch's own docs quotes it.
+    if (codexAdapter.isReady(content)) return null;
     // A fresh worktree is an unseen path, so codex asks whether to trust it
     // before it will render the composer. The user dispatched an agent into
     // their own repo, so answer yes rather than stalling the run.
@@ -604,7 +637,10 @@ const codexAdapter: AgentAdapter = {
 
     // Codex pools every session under one date tree rather than per-cwd, so
     // the cwd in session_meta is the only way to tell them apart.
-    for (const file of recentFiles(root, /^rollout-.*\.jsonl$/, 4, 60, since)) {
+    // Codex pools every session, including sub-agent rollouts, under one date
+    // tree. A 60-file window covered barely a day and left most worktrees
+    // permanently unfindable.
+    for (const file of recentFiles(root, /^rollout-.*\.jsonl$/, 4, 400, since)) {
       const matches = sessionCwdMatches(file, wtPath, (obj) =>
         obj.type === "session_meta" ? obj.payload?.cwd : undefined,
       );
@@ -636,11 +672,18 @@ const codexAdapter: AgentAdapter = {
             }
             break;
           }
+          case "mcp_tool_call_end":
+            b.tool(payload.server ? `${payload.server}:${payload.tool}` : "mcp");
+            break;
+          case "web_search_end":
+            b.tool("WebSearch");
+            if (payload.query) b.action(`Searched for "${String(payload.query).slice(0, 30)}"`);
+            break;
           case "turn_aborted":
             b.action(`Turn aborted (${payload.reason || "unknown"})`);
             break;
           case "agent_message":
-            b.turns++;
+            b.turn();
             if (payload.message) b.lastText = payload.message;
             break;
           case "task_complete":
@@ -665,6 +708,24 @@ const codexAdapter: AgentAdapter = {
             break;
           }
         }
+        return;
+      }
+
+      // Some codex builds report shell work as function_call with the args in
+      // `arguments` rather than custom_tool_call with `input`. Across the real
+      // rollouts on this machine that accounted for 330 dropped commands.
+      if (obj.type === "response_item" && payload.type === "function_call") {
+        const raw = String(payload.arguments || "");
+        b.tool(payload.name === "exec_command" ? "Bash" : payload.name || "tool");
+        let cmd = "";
+        try {
+          cmd = JSON.parse(raw).cmd || JSON.parse(raw).command || "";
+        } catch {
+          const m = raw.match(/"cmd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+          if (m) cmd = m[1].replace(/\\(.)/g, "$1");
+        }
+        if (cmd) b.shellCommand(cmd);
+        else if (payload.name) b.action(`Ran ${payload.name}`);
         return;
       }
 
@@ -712,7 +773,7 @@ const codexAdapter: AgentAdapter = {
         // Codex reports one `turn.completed` per prompt, not per model
         // response, so agent messages are the closer analogue to a Claude turn.
         case "agent_message":
-          b.turns++;
+          b.turn();
           if (item.text) b.lastText = item.text;
           break;
 

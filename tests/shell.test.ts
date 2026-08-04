@@ -36,14 +36,26 @@ describe("isClaudeReady", () => {
     assert.equal(isClaudeReady(banner), true);
   });
 
-  it("matches the empty input prompt on its own line", () => {
-    assert.equal(isClaudeReady("\n❯\n"), true);
-    assert.equal(isClaudeReady("\n> \n"), true);
-    assert.equal(isClaudeReady("\n? \n"), true);
+  // This previously asserted the opposite, encoding the bug as a requirement.
+  // `❯` is the default prompt character for pure, starship and powerlevel10k
+  // (this machine sets it in ~/.p10k.zsh), so treating it as readiness reported
+  // a pane sitting at a dead shell as a live agent. launchAgent then pasted the
+  // prompt there and the shell executed it line by line.
+  it("does not mistake a bare shell prompt for a ready agent", () => {
+    assert.equal(isClaudeReady("\n❯\n"), false);
+    assert.equal(isClaudeReady("\n> \n"), false);
+    assert.equal(isClaudeReady("~/git/repo on  main\n❯ "), false);
+    assert.equal(isClaudeReady("❯ claude --model opus\nError: unknown model\n❯ "), false);
   });
 
   it("matches older box-drawn welcome screens", () => {
     assert.equal(isClaudeReady("╭─ Welcome to Claude ─╮"), true);
+  });
+
+  // A box alone is not readiness: Claude's folder-trust dialog draws one with
+  // no composer, and a prompt pasted there answers the dialog instead.
+  it("does not treat a bare box border as readiness", () => {
+    assert.equal(isClaudeReady("╭──────────╮\n│ some box │\n╰──────────╯"), false);
   });
 });
 

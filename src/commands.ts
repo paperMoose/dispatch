@@ -67,6 +67,7 @@ import {
   waitForAgent,
   agentProcessAlive,
   tmuxSendCommand,
+  excludeDispatchArtifacts,
   tailFile,
   getCmuxWorkspaceId,
 } from "./shell.js";
@@ -317,6 +318,7 @@ async function launchAgent(
   let wtPath: string;
   if (skipWorktree) {
     wtPath = gitRoot();
+    excludeDispatchArtifacts(wtPath);
     if (noAsk) {
       log.info("ask rules left in place under --no-worktree (won't modify the main checkout's settings)");
     }
@@ -356,9 +358,9 @@ async function launchAgent(
       writeFileSync(pf, prompt);
       // Collapse newlines to spaces so cmuxSend doesn't fragment the prompt
       // into multiple submissions (Claude Code TUI treats \n as Enter/submit).
-      cmuxSend(wsId!, prompt.replace(/\n+/g, " "));
-      spawnSync("sleep", ["3"]);
-      cmuxSendKey(wsId!, "enter");
+      // cmuxSend appends a newline, which submits. A further Enter here was a
+      // second submission, landing after the agent may have opened a dialog.
+      cmuxSend(wsId!, collapseForPane(prompt));
       // Clear dispatch status so cmux's native claude-hook takes over state tracking
       cmuxLog(wsId!, "Prompt sent — agent working");
       cmuxClearStatus(wsId!, "dispatch");
@@ -384,8 +386,12 @@ async function launchAgent(
     // Write prompt to file and paste via tmux buffer
     const pf = join(wtPath, ".dispatch-prompt.txt");
     writeFileSync(pf, prompt);
+    // paste-buffer turns each newline into Enter, so a multi-line prompt (every
+    // Linear ticket) arrived as one submission per line. Send the flattened
+    // form; the file above keeps the original for reference.
+    writeFileSync(pf + ".send", collapseForPane(prompt));
     const bufName = `dispatch-${id.replace(/[^a-zA-Z0-9]/g, "-")}`;
-    execSync(`tmux load-buffer -b "${bufName}" "${pf}"`);
+    execSync(`tmux load-buffer -b "${bufName}" "${pf}.send"`);
     execSync(
       `tmux paste-buffer -b "${bufName}" -t "${tmuxTarget(id)}"`,
     );
@@ -959,8 +965,6 @@ function sendToPane(id: string, text: string): void {
     const wsId = getCmuxWorkspaceId(id);
     if (!wsId) throw new Error(`No cmux workspace for agent '${id}'`);
     cmuxSend(wsId, oneLine);
-    spawnSync("sleep", ["3"]);
-    cmuxSendKey(wsId, "enter");
     return;
   }
 
@@ -1027,7 +1031,7 @@ export function cmdSend(args: string[], config: Config): void {
   // neither CLI uses the alternate screen, so a dead agent's TUI stays in the
   // scrollback and still satisfies isReady. The pane behind it is a live
   // shell, and a message typed there executes as commands.
-  if (!agentProcessAlive(wtPath, adapter.bin)) {
+  if (!agentProcessAlive(wtPath, adapter.bin, id)) {
     log.error(`No running ${adapter.bin} found in ${id}, so nothing was sent.`);
     log.dim("  The pane is likely sitting at a shell after the agent exited.");
     log.dim(`  Check it first: dispatch attach ${id}`);
@@ -1035,6 +1039,14 @@ export function cmdSend(args: string[], config: Config): void {
   }
 
   const screen = tmuxCapture(id, 40);
+
+  // The process check cannot identify the pane on cmux, so require the TUI to
+  // actually be painted before typing anything into it.
+  if (!adapter.isReady(screen)) {
+    log.error(`No ${adapter.bin} prompt is visible in ${id}, so nothing was sent.`);
+    log.dim(`  Check it first: dispatch attach ${id}`);
+    process.exit(1);
+  }
 
   // A modal dialog swallows typed text and reads Enter as answering it, so a
   // message here would silently confirm a permission or trust prompt instead.

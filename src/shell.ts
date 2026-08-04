@@ -748,10 +748,60 @@ export { getCmuxWorkspaceId };
  *  a dead agent's rendered TUI stays in the scrollback and still matches every
  *  readiness marker. A tmux session outliving its agent is normal, and the
  *  pane behind it is a live shell, so anything typed there executes. */
-export function agentProcessAlive(wtPath: string, bin: string): boolean {
+/** PIDs descended from `root`, including it. */
+function descendants(root: string, depth = 4): string[] {
+  const out = [root];
+  let frontier = [root];
+  for (let i = 0; i < depth && frontier.length; i++) {
+    const next: string[] = [];
+    for (const pid of frontier) {
+      const kids = execQuiet(`pgrep -P ${pid}`);
+      if (!kids) continue;
+      for (const k of kids.trim().split("\n")) {
+        if (/^\d+$/.test(k) && !out.includes(k)) {
+          out.push(k);
+          next.push(k);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+/** True when an agent CLI is running *in this agent's pane*.
+ *
+ *  Pane content cannot answer this: neither CLI uses the alternate screen, so
+ *  a dead agent's TUI stays in the scrollback. Nor can "some process with this
+ *  cwd" — a worktree routinely hosts more than one agent (an operator
+ *  attaching, a second dispatch run, a sub-agent), and any of them keeps the
+ *  answer true after the pane's own agent exits. Text typed into that pane
+ *  then reaches a shell.
+ *
+ *  On tmux the pane's PID is authoritative, so walk its descendants. cmux
+ *  exposes no pane PID, so fall back to the cwd match, which is why the caller
+ *  must also require a painted TUI. */
+export function agentProcessAlive(
+  wtPath: string,
+  bin: string,
+  id?: string,
+): boolean {
+  if (!useCmux() && id) {
+    const panePid = execQuiet(
+      `tmux list-panes -t "${tmuxTarget(id)}" -F "#{pane_pid}"`,
+    );
+    if (panePid && /^\d+$/.test(panePid.trim())) {
+      for (const pid of descendants(panePid.trim())) {
+        const comm = execQuiet(`ps -p ${pid} -o comm=`);
+        if (comm && basename(comm.trim()) === bin) return true;
+      }
+      return false;
+    }
+  }
+
+  // cmux, or no pane: cwd match. Weaker, since it cannot tell which pane.
   const pids = execQuiet(`pgrep -x ${bin}`);
   if (!pids) return false;
-
   for (const pid of pids.trim().split("\n")) {
     if (!/^\d+$/.test(pid)) continue;
     const info = execQuiet(`lsof -a -p ${pid} -d cwd -Fn`);
@@ -762,6 +812,11 @@ export function agentProcessAlive(wtPath: string, bin: string): boolean {
   }
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// Agent readiness
+// ---------------------------------------------------------------------------
+
 
 /** True when terminal content shows the Claude TUI is rendered and ready.
  *  Kept as a named export for callers that only ever drive Claude. */
