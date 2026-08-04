@@ -1,6 +1,6 @@
 import { execSync, spawnSync, spawn, type ChildProcess } from "child_process";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync } from "fs";
-import { join, basename } from "path";
+import { join, basename, dirname } from "path";
 import type { Config } from "./config.js";
 import { getAdapter, type AgentAdapter } from "./agents.js";
 import {
@@ -158,6 +158,57 @@ export function worktreePath(id: string, config: Config): string {
   return join(gitRoot(), config.worktreeDir, id);
 }
 
+/** Files dispatch writes into a worktree for its own bookkeeping. They are not
+ *  part of the user's project, but they sit untracked in the working tree, and
+ *  agents routinely run `git add -A && git commit`. Without this they end up in
+ *  the user's pull request: noah-server's 2ab87ecf2 shipped a prompt file and a
+ *  workspace id alongside real code. */
+const DISPATCH_ARTIFACTS = [
+  ".dispatch-agent",
+  ".dispatch-prompt.txt",
+  ".dispatch-cmux-workspace",
+  ".dispatch.log",
+];
+
+/** Hide dispatch's own files from git.
+ *
+ *  `.git/info/exclude` rather than `.gitignore`, because it is never committed:
+ *  nothing about dispatch reaches the user's repository or their teammates.
+ *
+ *  Linked worktrees share this file with the main checkout, so the entries also
+ *  apply there. That is intended: the same artifacts appear in the primary
+ *  checkout under `--no-worktree`, and no one wants to commit them from there
+ *  either. Writing is idempotent, so repeated runs do not append duplicates. */
+export function excludeDispatchArtifacts(wtPath: string): void {
+  const res = spawnSync("git", ["-C", wtPath, "rev-parse", "--git-path", "info/exclude"], {
+    encoding: "utf-8",
+    stdio: "pipe",
+  });
+  if (res.status !== 0) return;
+
+  // Resolve against the worktree: git may return this path relative to it.
+  const raw = res.stdout.trim();
+  const excludePath = raw.startsWith("/") ? raw : join(wtPath, raw);
+
+  let existing = "";
+  try {
+    existing = readFileSync(excludePath, "utf-8");
+  } catch {
+    // Missing file is normal; it is created below.
+  }
+
+  const missing = DISPATCH_ARTIFACTS.filter((a) => !existing.includes(a));
+  if (missing.length === 0) return;
+
+  try {
+    mkdirSync(dirname(excludePath), { recursive: true });
+    const block = ["", "# dispatch bookkeeping, not part of this project", ...missing, ""];
+    writeFileSync(excludePath, existing.replace(/\n*$/, "\n") + block.join("\n"));
+  } catch {
+    // Non-fatal: the worst case is the pre-existing behaviour.
+  }
+}
+
 export function createWorktree(
   id: string,
   branch: string,
@@ -192,6 +243,7 @@ export function createWorktree(
       process.exit(1);
     }
   }
+  excludeDispatchArtifacts(wtPath);
   log.ok(`Worktree created at ${wtPath}`);
 }
 
