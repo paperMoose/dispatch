@@ -6,6 +6,7 @@ import { randomBytes } from "crypto";
 import { type Config } from "./config.js";
 import {
   getAdapter,
+  modelRuntime,
   isAgentKind,
   AGENT_KINDS,
   type AgentLogSummary,
@@ -511,6 +512,17 @@ export async function cmdRun(
   }
 
   if (modelOverride) {
+    // Models are not portable between runtimes, and the failure is silent:
+    // codex rejects a Claude model with a 400 as soon as the prompt lands, so
+    // the agent reads as "never started" rather than "wrong model".
+    const owner = modelRuntime(modelOverride);
+    if (owner && owner !== config.agent) {
+      log.error(`'${modelOverride}' is a ${owner} model, but this run uses ${config.agent}.`);
+      log.dim(`  Run it on ${owner}:  --agent ${owner} --model ${modelOverride}`);
+      log.dim(`  Or pick a ${config.agent} model instead.`);
+      log.dim(`  The runtime default comes from ~/.dispatch.yml (agent: ${config.agent}).`);
+      process.exit(1);
+    }
     config[getAdapter(config.agent).modelKey] = modelOverride;
   }
 
@@ -1080,6 +1092,15 @@ export function cmdStatus(args: string[], config: Config): void {
     console.log(output);
     if (trace.source === "session") {
       log.dim("  (from the agent CLI's session transcript — interactive mode)");
+    }
+
+    // Zero turns is ambiguous on its own: it looks the same whether the agent
+    // is still starting, never received its prompt, or died the moment the
+    // prompt arrived. Only the pane distinguishes them, so show it.
+    if (trace.parsed.turns === 0 && sessionExists(id)) {
+      console.log();
+      console.log("No turns yet. What the terminal shows:");
+      console.log(tmuxCapture(id, 20).trimEnd());
     }
     console.log();
     return;

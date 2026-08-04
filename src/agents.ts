@@ -29,6 +29,25 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Model names that clearly belong to one runtime.
+ *
+ *  `--model` applies to whichever runtime is selected, so with `agent: codex`
+ *  in the config, `-m opus` silently becomes `codex -m opus`. Codex answers
+ *  that with a 400 the instant the prompt arrives, and the agent looks like it
+ *  simply never started. Catch the mismatch before launching. */
+const MODEL_OWNERS: { pattern: RegExp; runtime: AgentKind }[] = [
+  { pattern: /^(opus|sonnet|haiku)\b|^claude[-.]/i, runtime: "claude" },
+  { pattern: /^(gpt|o[0-9]|codex)[-.]?/i, runtime: "codex" },
+];
+
+/** The runtime a model name belongs to, or null when it is not recognisable. */
+export function modelRuntime(model: string): AgentKind | null {
+  for (const { pattern, runtime } of MODEL_OWNERS) {
+    if (pattern.test(model.trim())) return runtime;
+  }
+  return null;
+}
+
 export function isAgentKind(value: string): value is AgentKind {
   return (AGENT_KINDS as string[]).includes(value);
 }
@@ -553,6 +572,21 @@ const codexAdapter: AgentAdapter = {
 
       if (obj.type === "event_msg") {
         switch (payload.type) {
+          // A run that dies on a rejected model or an API error otherwise
+          // parses to all zeros, which reads exactly like an agent that has
+          // not started yet.
+          case "stream_error":
+          case "error": {
+            const msg = payload.message || payload.error?.message;
+            if (msg) {
+              b.lastText = `Error: ${msg}`;
+              b.action("Run failed");
+            }
+            break;
+          }
+          case "turn_aborted":
+            b.action(`Turn aborted (${payload.reason || "unknown"})`);
+            break;
           case "agent_message":
             b.turns++;
             if (payload.message) b.lastText = payload.message;

@@ -501,3 +501,38 @@ describe("codex rollout parsing matches what codex actually emits", () => {
     assert.deepEqual(codex.parseSession(codeMode).commits, ["add hello"]);
   });
 });
+
+describe("failed runs are visible, not silent", () => {
+  const codex = getAdapter("codex");
+
+  // A codex run rejected at the API (wrong model, no credits) produced a
+  // summary of all zeros, which reads identically to an agent that has not
+  // started. That ambiguity cost a night of debugging on 2026-08-04.
+  it("surfaces a stream error from the session transcript", () => {
+    const rollout = [
+      `{"type":"session_meta","payload":{"cwd":"/wt/a"}}`,
+      `{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`,
+      `{"type":"event_msg","payload":{"type":"stream_error","message":"The 'opus' model is not supported when using Codex with a ChatGPT account."}}`,
+    ].join("\n");
+
+    const parsed = codex.parseSession(rollout);
+    assert.match(parsed.lastText, /not supported when using Codex/);
+    assert.ok(parsed.lastActions.includes("Run failed"));
+  });
+
+  it("reports an aborted turn with its reason", () => {
+    const rollout = `{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}`;
+    assert.ok(
+      codex.parseSession(rollout).lastActions.some((a) => a.includes("interrupted")),
+    );
+  });
+
+  it("still reports zero turns when genuinely nothing happened", () => {
+    // The distinction between "failed" and "not started" has to survive:
+    // an empty transcript must not invent an error.
+    const parsed = codex.parseSession(`{"type":"session_meta","payload":{"cwd":"/wt/a"}}`);
+    assert.equal(parsed.turns, 0);
+    assert.equal(parsed.lastText, "");
+    assert.deepEqual(parsed.lastActions, []);
+  });
+});
