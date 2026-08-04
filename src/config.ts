@@ -1,4 +1,5 @@
 import { readFileSync } from "fs";
+import { AGENT_KINDS, REASONING_EFFORTS } from "./agents.js";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -115,6 +116,27 @@ export function loadConfig(cliOverrides?: Partial<Config>): Config {
       (config as any)[key] =
         key === "claudeTimeout" ? Number(val) : val;
     }
+  }
+
+  // Validate before anything is created. An unknown runtime used to surface
+  // from getAdapter partway through launch, after the worktree, branch and
+  // terminal window already existed, leaving all three behind on every run.
+  if (config.agent && !AGENT_KINDS.includes(config.agent as any)) {
+    throw new Error(
+      `Unknown agent runtime '${config.agent}'. Expected one of: ${AGENT_KINDS.join(", ")}` +
+        `\n  Set 'agent:' in ${configPath} or pass --agent.`,
+    );
+  }
+
+  if (
+    config.reasoningEffort &&
+    !REASONING_EFFORTS.includes(config.reasoningEffort as any)
+  ) {
+    throw new Error(
+      `Unknown reasoning effort '${config.reasoningEffort}'. Expected one of: ${REASONING_EFFORTS.join(", ")}` +
+        `\n  An unrecognised value is rejected by the model provider only once the prompt arrives,` +
+        `\n  which looks like an agent that never started.`,
+    );
   }
 
   // 3. CLI flags override everything

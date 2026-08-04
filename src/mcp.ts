@@ -265,11 +265,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const tmpFile = makeTempPrompt(prompt);
 
       try {
-        const parts: string[] = ["run"];
-        parts.push(ticket || "prompt-file");
-        parts.push(`--prompt-file "${tmpFile}"`);
         // Every one of these comes from a model, and the schema's enums are
         // advisory: nothing validates them before they reach a shell.
+        const parts: string[] = ["run"];
+        parts.push(shellArg(String(ticket || "prompt-file")));
+        parts.push(`--prompt-file ${shellArg(tmpFile)}`);
         if (agentName) parts.push(`--name ${shellArg(String(agentName))}`);
         if (agent) parts.push(`--agent ${shellArg(String(agent))}`);
         if (effort) parts.push(`--effort ${shellArg(String(effort))}`);

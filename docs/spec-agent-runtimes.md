@@ -230,9 +230,12 @@ after Phase 2 without blocking it.
 
 - `src/config.ts`: add `agent: AgentKind` to `Config` and `DEFAULTS` (default
   `"claude"`), `agent` to `KEY_MAP`, `DISPATCH_AGENT` to the env map. Validate
-  the value and fail with a clear message on an unknown runtime. Rename
-  `claudeTimeout` to `agentTimeout`, keeping `claude_timeout` and
-  `DISPATCH_CLAUDE_TIMEOUT` as accepted aliases.
+  the value and fail with a clear message on an unknown runtime. **Done in
+  0.9.6**, along with `reasoning_effort`; both are checked in `loadConfig` so a
+  bad value cannot reach the point where a worktree and terminal already exist.
+  The `claudeTimeout` rename was **not** done: `agent_timeout` is accepted as a
+  YAML alias and is what the help advertises, but the field and the
+  `DISPATCH_CLAUDE_TIMEOUT` env var keep their original names.
 - `src/commands.ts` `cmdRun`: parse `--agent <kind>` and `-A <kind>`. Note the
   existing `default:` arm forwards unknown `--flags` to `extraArgs`, so `--agent`
   must be added explicitly or it silently reaches the CLI.
@@ -300,7 +303,7 @@ Manual verification, since no unit test covers the TUI:
 | Codex TUI markup changes between versions and breaks readiness detection | Match on several independent markers, and keep the existing timeout warning path rather than hanging |
 | Update prompt variants not covered by the dismissal | Config key suppresses it at the source; dismissal is the fallback |
 | Tier 2 prod guard inert under the codex bypass flag | Verify first; Tier 1 (pre-push hook) does not depend on it |
-| `parseAgentLog` is exported and may be used externally | Keep the export and its signature, delegate internally |
+| ~~`parseAgentLog` is exported and may be used externally~~ | **Not kept.** It was removed once `readAgentTrace` replaced it; nothing outside the repo consumed it. |
 | Schedules created before 0.9.0 have no `agent` field | Absent field means `claude`, covered by a wrapper test |
 
 ## Open questions

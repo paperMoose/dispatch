@@ -415,6 +415,19 @@ export function tmuxSendKeys(id: string, keys: string): void {
   execSync(`tmux send-keys -t "${tmuxTarget(id)}" ${keys}`);
 }
 
+/** Type a command line into a pane without a shell in the way.
+ *
+ *  The launch line contains single-quoted values (models, reasoning effort),
+ *  and single quotes are inert inside the double-quoted argument that a shell
+ *  string form of `send-keys` requires. `$(...)` and backticks in those values
+ *  then execute in the host shell, before tmux is ever invoked. Passing argv
+ *  directly removes that shell entirely. */
+export function tmuxSendCommand(id: string, line: string): void {
+  spawnSync("tmux", ["send-keys", "-t", tmuxTarget(id), line, "Enter"], {
+    stdio: "pipe",
+  });
+}
+
 export function tmuxSendText(id: string, text: string): void {
   if (useCmux()) {
     const wsId = getCmuxWorkspaceId(id);

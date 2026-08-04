@@ -7,10 +7,16 @@ base_branch: dev
 # Which agent CLI to drive: claude or codex (default: claude)
 # agent: claude
 
-# Default model for the selected runtime.
-# claude: opus[1m] (default) — Opus 5 with the 1M context window
-# codex:  gpt-5.6-sol, etc.
+# Model per runtime. These are separate keys because model names are not
+# portable: `model:` is read only when agent is claude, `codex_model:` only
+# when it is codex. Setting `model: gpt-5.6-sol` under `agent: codex` is
+# ignored, and codex silently runs its own default.
 # model: opus[1m]
+# codex_model: gpt-5.6-sol
+
+# Codex reasoning depth: low | medium | high | xhigh | max | ultra.
+# Ignored by claude, which has no CLI equivalent.
+# reasoning_effort: xhigh
 
 # Permission mode for agents (default: dontAsk — no prompts).
 # Set to "" to get normal permission prompts back.

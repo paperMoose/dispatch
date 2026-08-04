@@ -24,6 +24,18 @@ export type AgentKind = "claude" | "codex";
 
 export const AGENT_KINDS: AgentKind[] = ["claude", "codex"];
 
+/** Reasoning depths codex accepts. An unrecognised value is not rejected at
+ *  launch, only when the prompt reaches the provider, so it has to be caught
+ *  here or it presents as an agent that never started. */
+export const REASONING_EFFORTS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const;
+
 /** Single-quote a value so shell metacharacters cannot escape the command. */
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;

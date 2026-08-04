@@ -8,6 +8,7 @@ import {
   getAdapter,
   resolveRuntime,
   isAgentKind,
+  REASONING_EFFORTS,
   AGENT_KINDS,
   type AgentLogSummary,
 } from "./agents.js";
@@ -65,6 +66,7 @@ import {
   notify,
   waitForAgent,
   agentProcessAlive,
+  tmuxSendCommand,
   tailFile,
   getCmuxWorkspaceId,
 } from "./shell.js";
@@ -169,6 +171,19 @@ function promptNotSent(
   log.dim(`  The pane may be sitting at a shell. Check it: dispatch attach ${id}`);
   log.dim(`  Prompt saved to ${pf}`);
   log.dim(`  Common causes: a model the runtime does not know, or auth expired`);
+}
+
+/** Last thing the agent said, from a .dispatch.log tail.
+ *
+ *  Each runtime has its own event shape, so this goes through the adapter.
+ *  Several call sites used to match Claude's `assistant` envelope directly,
+ *  which left every headless codex agent showing blank activity. */
+function lastAgentText(logContent: string, agent: string): string {
+  try {
+    return getAdapter(agent).parseLog(logContent).lastText;
+  } catch {
+    return "";
+  }
 }
 
 const AGENT_MARKER = ".dispatch-agent";
@@ -359,10 +374,8 @@ async function launchAgent(
     }
   } else if (mode === "interactive") {
     // Launch the agent, wait for it to be ready, then send prompt via paste-buffer
-    const launch = interactiveAgentCmd(config).replace(/"/g, '\\"');
-    execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "${prefix}${launch}" Enter`,
-    );
+    const launch = interactiveAgentCmd(config);
+    tmuxSendCommand(id, `${prefix}${launch}`);
     if (!waitForAgent(id, config.claudeTimeout, getAdapter(config.agent))) {
       promptNotSent(id, wtPath, prompt, config);
       return id;
@@ -382,8 +395,9 @@ async function launchAgent(
   } else {
     // Headless: run with -p, tee to log, notify on completion
     const logFile = join(wtPath, ".dispatch.log");
-    execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "${prefix}${agentCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
+    tmuxSendCommand(
+      id,
+      `${prefix}${agentCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}`,
     );
   }
 
@@ -444,10 +458,17 @@ export async function cmdRun(
         modelOverride = args[++i];
         i++;
         break;
-      case "--effort":
-        config.reasoningEffort = args[++i];
+      case "--effort": {
+        const level = args[++i];
+        if (!REASONING_EFFORTS.includes(level as any)) {
+          log.error(`Unknown reasoning effort '${level}'.`);
+          log.dim(`  Expected one of: ${REASONING_EFFORTS.join(", ")}`);
+          process.exit(1);
+        }
+        config.reasoningEffort = level;
         i++;
         break;
+      }
       case "--agent":
       case "-A": {
         const kind = args[++i];
@@ -682,20 +703,9 @@ export function cmdList(config: Config, brief = false): void {
       if (existsSync(logFile)) {
         const tail = execQuiet(`tail -20 '${logFile}'`);
         if (tail) {
-          const jsonLines = tail.split("\n").reverse();
-          for (const jl of jsonLines) {
-            try {
-              const obj = JSON.parse(jl);
-              if (obj.type === "assistant" && obj.message?.content) {
-                const textBlock = obj.message.content.find((b: any) => b.type === "text");
-                if (textBlock?.text) {
-                  const ll = textBlock.text.split("\n").filter((l: string) => l.trim());
-                  lastLine = ll[ll.length - 1]?.trim() || "";
-                  break;
-                }
-              }
-            } catch {}
-          }
+          const text = lastAgentText(tail, readAgentMarker(path));
+          const ll = text.split("\n").filter((l: string) => l.trim());
+          lastLine = ll[ll.length - 1]?.trim() || "";
         }
       }
       if (!lastLine) {
@@ -1249,17 +1259,16 @@ export function cmdResume(args: string[], config: Config): void {
       log.ok(`Resumed agent: ${id} (headless)`);
     }
   } else if (!headless) {
-    const launch = interactiveAgentCmd(config, true).replace(/"/g, '\\"');
-    execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "${prefix}${launch}" Enter`,
-    );
+    const launch = interactiveAgentCmd(config, true);
+    tmuxSendCommand(id, `${prefix}${launch}`);
     log.ok(`Resumed agent: ${id} (interactive)`);
     if (!noAttach) tmuxAttach(id, false);
   } else {
     const agentCmd = buildAgentCmd(resumePrompt, "headless", wtPath, config, "", true);
     const logFile = join(wtPath, ".dispatch.log");
-    execSync(
-      `tmux send-keys -t "${tmuxTarget(id)}" "${prefix}${agentCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}" Enter`,
+    tmuxSendCommand(
+      id,
+      `${prefix}${agentCmd} 2>&1 | tee -a ${logFile}; dispatch _notify-done ${id}`,
     );
     log.ok(`Resumed agent: ${id} (headless)`);
   }
@@ -1735,19 +1744,7 @@ export function cmdNotifyDone(args: string[], config: Config): void {
   if (existsSync(logFile)) {
     const tail = execQuiet(`tail -30 '${logFile}'`);
     if (tail) {
-      const jsonLines = tail.split("\n").reverse();
-      for (const jl of jsonLines) {
-        try {
-          const obj = JSON.parse(jl);
-          if (obj.type === "assistant" && obj.message?.content) {
-            const textBlock = obj.message.content.find((b: any) => b.type === "text");
-            if (textBlock?.text) {
-              summary = textBlock.text.slice(0, 500);
-              break;
-            }
-          }
-        } catch {}
-      }
+      summary = lastAgentText(tail, readAgentMarker(wtPath)).slice(0, 500);
     }
   }
 
@@ -1935,7 +1932,7 @@ const CLAUDE_MD_SNIPPET = `
 
 Launch Claude Code agents in isolated git worktrees. Each agent gets its own branch, so it can make changes without affecting your working tree or other agents. Agents run inside tmux or cmux — interactive mode to watch/guide, headless for fire-and-forget.
 
-**Default model: Opus 5 with the 1M context window (\`opus[1m]\`).** All agents use it unless you explicitly pass \`--model sonnet\` or \`--model haiku\`. Do not use Sonnet unless specifically requested. Quote any model name containing brackets — \`--model 'opus[1m]'\` — or zsh will glob it.
+**Runtime and model.** The runtime comes from \`agent:\` in \`~/.dispatch.yml\` (default \`claude\`). Naming a model selects its runtime: \`--model opus\` runs claude, \`--model gpt-5.6-sol\` runs codex. Claude's default is Opus 5 with the 1M window (\`opus[1m]\`); do not use Sonnet unless asked. Quote model names containing brackets — \`--model 'opus[1m]'\` — or zsh will glob them.
 
 **Permission prompts are off by default.** Agents run with \`--permission-mode dontAsk\` and the worktree's \`permissions.ask\` rules stripped, so they don't stall waiting for approval. That also means a dispatched agent can push, merge, and run migrations unprompted inside its worktree — pass \`--ask\` when you want the prompts back.
 
@@ -1959,7 +1956,7 @@ dispatch send HEY-123 "use the existing helper"       # Steer a running interact
 
 # Lifecycle
 dispatch stop HEY-123                                 # Interrupt agent (worktree preserved)
-dispatch resume HEY-123                               # Pick up where it left off (--continue)
+dispatch resume HEY-123                               # Pick up where it left off
 dispatch cleanup HEY-123 --delete-branch              # Remove worktree + branch
 dispatch cleanup --all --delete-branch                # Clean up everything
 dispatch prune --merged --delete-branch               # Remove worktrees with merged PRs
@@ -2085,8 +2082,24 @@ export function parseScheduleAddArgs(args: string[]): ScheduleAddArgs {
       case "--prompt": out.prompt = args[++i]; break;
       case "--command": out.command = args[++i]; break;
       case "--branch-prefix": out.branchPrefix = args[++i]; break;
-      case "--agent": out.agent = args[++i]; break;
-      case "--effort": out.effort = args[++i]; break;
+      case "--agent": {
+        const kind = args[++i];
+        // A schedule that names an unknown runtime registers cleanly and then
+        // fails every firing in the background, where nobody sees it.
+        if (!isAgentKind(kind)) {
+          throw new Error(`Unknown agent runtime: ${kind}. Expected one of: ${AGENT_KINDS.join(", ")}`);
+        }
+        out.agent = kind;
+        break;
+      }
+      case "--effort": {
+        const level = args[++i];
+        if (!REASONING_EFFORTS.includes(level as any)) {
+          throw new Error(`Unknown reasoning effort: ${level}. Expected one of: ${REASONING_EFFORTS.join(", ")}`);
+        }
+        out.effort = level;
+        break;
+      }
       case "--model": out.model = args[++i]; break;
       case "--repo": out.repo = args[++i]; break;
       case "--max-turns": out.maxTurns = args[++i]; break;
@@ -2356,6 +2369,8 @@ function scheduleShow(name: string): void {
   }
   if (meta.command) console.log(`  command:       ${meta.command}`);
   if (meta.branch_prefix) console.log(`  branch_prefix: ${meta.branch_prefix}`);
+  if (meta.agent) console.log(`  agent:         ${meta.agent}`);
+  if (meta.reasoning_effort) console.log(`  effort:        ${meta.reasoning_effort}`);
   if (meta.model) console.log(`  model:         ${meta.model}`);
   if (meta.repo) console.log(`  repo:          ${meta.repo}`);
   if (meta.max_turns) console.log(`  max_turns:     ${meta.max_turns}`);

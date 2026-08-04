@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -247,17 +248,31 @@ describe("codex reasoning effort", () => {
     );
   });
 
-  // The value is typed into a pane shell, so it must not be able to escape it.
-  it("quotes the effort so it cannot break out of the command", () => {
-    const cmd = codex.paneCmd(
-      makeConfig({ agent: "codex", reasoningEffort: "high; touch /tmp/PWNED" }),
-      false,
-    );
-    // The payload must sit inside one quoted argument, so the shell sees a
-    // single -c value rather than a second command after the semicolon.
-    assert.ok(cmd.includes(`-c 'model_reasoning_effort=high; touch /tmp/PWNED'`));
-    const afterQuoted = cmd.split(`/tmp/PWNED'`)[1] || "";
-    assert.ok(!afterQuoted.includes("touch"), `escaped the quotes: ${cmd}`);
+  // This previously asserted only that a semicolon stayed inside the quotes,
+  // which single quotes already handle. It passed while $(...) escaped at the
+  // next layer, where the line was embedded in a double-quoted shell argument.
+  // The real property is that the value survives to the agent verbatim and is
+  // never evaluated, so assert that against an actual shell.
+  it("keeps a shell payload inert rather than evaluating it", () => {
+    for (const payload of [
+      "high; touch /tmp/PWNED",
+      "high$(touch /tmp/PWNED)",
+      "high`touch /tmp/PWNED`",
+      "high'; touch /tmp/PWNED; '",
+    ]) {
+      const cmd = codex.paneCmd(
+        makeConfig({ agent: "codex", reasoningEffort: payload }),
+        false,
+      );
+      // Ask a real shell to split the line, and confirm the payload arrives as
+      // one argument with nothing executed.
+      const out = execFileSync(
+        "/bin/sh",
+        ["-c", `printf '%s\\n' ${cmd.replace(/^codex /, "")} | grep -c PWNED || true`],
+        { encoding: "utf-8" },
+      );
+      assert.equal(out.trim(), "1", `payload was split or evaluated: ${payload}`);
+    }
   });
 
   it("omits it when unset so codex uses its own default", () => {

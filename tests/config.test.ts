@@ -199,3 +199,50 @@ describe("loadConfig", () => {
     }
   });
 });
+
+describe("config validation", () => {
+  const withConfig = (body: string, fn: () => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-val-"));
+    const file = join(dir, ".dispatch.yml");
+    writeFileSync(file, body);
+    const saved = process.env.DISPATCH_CONFIG;
+    process.env.DISPATCH_CONFIG = file;
+    try {
+      fn();
+    } finally {
+      if (saved !== undefined) process.env.DISPATCH_CONFIG = saved;
+      else delete process.env.DISPATCH_CONFIG;
+    }
+  };
+
+  // An unknown runtime used to surface from getAdapter partway through launch,
+  // after the worktree, branch and terminal window already existed.
+  it("rejects an unknown runtime at load, before anything is created", () => {
+    withConfig("agent: gemini\n", () => {
+      assert.throws(() => loadConfig(), /Unknown agent runtime 'gemini'/);
+    });
+  });
+
+  // A bad effort is only rejected once the prompt reaches the provider, which
+  // presents as an agent that never started.
+  it("rejects an unknown reasoning effort", () => {
+    withConfig("agent: codex\nreasoning_effort: hgih\n", () => {
+      assert.throws(() => loadConfig(), /Unknown reasoning effort 'hgih'/);
+    });
+  });
+
+  it("accepts every advertised effort level", () => {
+    for (const level of ["low", "medium", "high", "xhigh", "max", "ultra"]) {
+      withConfig(`reasoning_effort: ${level}\n`, () => {
+        assert.equal(loadConfig().reasoningEffort, level, level);
+      });
+    }
+  });
+
+  it("accepts a config with neither key set", () => {
+    withConfig("base_branch: dev\n", () => {
+      assert.equal(loadConfig().agent, "claude");
+      assert.equal(loadConfig().reasoningEffort, "");
+    });
+  });
+});
