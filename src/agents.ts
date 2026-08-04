@@ -48,6 +48,46 @@ export function modelRuntime(model: string): AgentKind | null {
   return null;
 }
 
+/** Outcome of reconciling a requested model with the selected runtime. */
+export interface RuntimeChoice {
+  /** Runtime to launch. Unchanged unless the model selected a different one. */
+  agent: string;
+  /** Set when the model changed the runtime, for reporting to the operator. */
+  switchedTo?: AgentKind;
+  /** Set when the request cannot be satisfied; the caller should not launch. */
+  error?: string;
+}
+
+/** Decide which runtime runs a request.
+ *
+ *  A model name is a clearer statement of intent than a config default, so a
+ *  recognisable model selects its own runtime. Pairing them blindly produced
+ *  `codex -m opus`, which is rejected with a 400 as the prompt lands and leaves
+ *  an agent that reads as one that never started.
+ *
+ *  A typed `--agent` still wins, and a typed `--agent` that contradicts the
+ *  model is refused: resolving it either way would override something the
+ *  operator actually wrote. */
+export function resolveRuntime(
+  agent: string,
+  modelOverride: string,
+  agentExplicit: boolean,
+): RuntimeChoice {
+  if (!modelOverride) return { agent };
+
+  const owner = modelRuntime(modelOverride);
+  // An unrecognised name (local or fine-tuned) belongs to whatever is selected.
+  if (!owner || owner === agent) return { agent };
+
+  if (agentExplicit) {
+    return {
+      agent,
+      error: `--agent ${agent} cannot run ${modelOverride}, which is a ${owner} model.`,
+    };
+  }
+  return { agent: owner, switchedTo: owner };
+}
+
 export function isAgentKind(value: string): value is AgentKind {
   return (AGENT_KINDS as string[]).includes(value);
 }

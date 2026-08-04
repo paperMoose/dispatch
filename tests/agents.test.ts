@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { getAdapter, isAgentKind, modelRuntime, AGENT_KINDS } from "../src/agents.js";
+import {
+  getAdapter,
+  isAgentKind,
+  modelRuntime,
+  resolveRuntime,
+  AGENT_KINDS,
+} from "../src/agents.js";
 import type { Config } from "../src/config.js";
 
 function makeConfig(overrides?: Partial<Config>): Config {
@@ -558,6 +564,78 @@ describe("modelRuntime", () => {
     // being guessed into the wrong one.
     for (const m of ["", "my-finetune", "llama-3", "some/local-model"]) {
       assert.equal(modelRuntime(m), null, m);
+    }
+  });
+});
+
+describe("resolveRuntime", () => {
+  // The decision that actually runs at launch. Previously this logic lived
+  // inside cmdRun, alongside worktree and tmux work, so it could only be
+  // checked by running the CLI and reading the output.
+
+  it("lets a claude model select claude when codex is configured", () => {
+    // The exact case that failed on 2026-08-04: `-m opus` with agent: codex
+    // built `codex -m opus`, rejected with a 400 as the prompt arrived.
+    const r = resolveRuntime("codex", "opus", false);
+    assert.equal(r.agent, "claude");
+    assert.equal(r.switchedTo, "claude");
+    assert.equal(r.error, undefined);
+  });
+
+  it("lets a codex model select codex when claude is configured", () => {
+    const r = resolveRuntime("claude", "gpt-5.6-sol", false);
+    assert.equal(r.agent, "codex");
+    assert.equal(r.switchedTo, "codex");
+  });
+
+  it("stays put when the model already matches", () => {
+    const r = resolveRuntime("claude", "opus[1m]", false);
+    assert.equal(r.agent, "claude");
+    assert.equal(r.switchedTo, undefined, "no switch should be reported");
+  });
+
+  it("stays put when no model was given", () => {
+    const r = resolveRuntime("codex", "", false);
+    assert.equal(r.agent, "codex");
+    assert.equal(r.switchedTo, undefined);
+  });
+
+  it("passes an unrecognised model through untouched", () => {
+    // Local and fine-tuned models must not be guessed into a runtime. Checked
+    // from BOTH starting runtimes: testing only from codex cannot distinguish
+    // "left alone" from "guessed into codex".
+    for (const start of ["codex", "claude"]) {
+      for (const m of ["my-finetune", "llama-3", "some/local-model"]) {
+        const r = resolveRuntime(start, m, false);
+        assert.equal(r.agent, start, `${start}/${m}`);
+        assert.equal(r.switchedTo, undefined, `${start}/${m} must not switch`);
+        assert.equal(r.error, undefined, `${start}/${m}`);
+      }
+    }
+  });
+
+  it("refuses rather than overriding an explicit --agent", () => {
+    const r = resolveRuntime("codex", "opus", true);
+    assert.match(r.error || "", /--agent codex cannot run opus/);
+    assert.equal(r.switchedTo, undefined, "must not switch behind the operator");
+  });
+
+  it("accepts an explicit --agent that agrees with the model", () => {
+    const r = resolveRuntime("claude", "sonnet", true);
+    assert.equal(r.agent, "claude");
+    assert.equal(r.error, undefined);
+  });
+
+  it("never returns both a switch and an error", () => {
+    const cases: [string, string, boolean][] = [
+      ["codex", "opus", false], ["codex", "opus", true],
+      ["claude", "gpt-5.6-sol", false], ["claude", "gpt-5.6-sol", true],
+      ["claude", "opus", false], ["codex", "unknown-model", false],
+    ];
+    for (const [a, m, e] of cases) {
+      const r = resolveRuntime(a, m, e);
+      assert.ok(!(r.switchedTo && r.error), `${a}/${m}/${e}`);
+      if (r.error) assert.equal(r.agent, a, "a refused request must not move the runtime");
     }
   });
 });

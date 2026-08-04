@@ -6,7 +6,7 @@ import { randomBytes } from "crypto";
 import { type Config } from "./config.js";
 import {
   getAdapter,
-  modelRuntime,
+  resolveRuntime,
   isAgentKind,
   AGENT_KINDS,
   type AgentLogSummary,
@@ -516,22 +516,16 @@ export async function cmdRun(
   }
 
   if (modelOverride) {
-    // A model name implies its runtime. Naming a model is a clearer statement
-    // of intent than a config default, so follow it rather than pairing the
-    // two into something the runtime cannot serve: `codex -m opus` is rejected
-    // with a 400 the moment the prompt lands, and the agent then reads as one
-    // that never started.
-    const owner = modelRuntime(modelOverride);
-    if (owner && owner !== config.agent && !agentExplicit) {
-      log.info(`Using ${owner} — ${modelOverride} is a ${owner} model`);
-      config.agent = owner;
-    } else if (owner && owner !== config.agent && agentExplicit) {
-      // Both were given explicitly and they disagree; guessing either way
-      // would override something the operator typed.
-      log.error(`--agent ${config.agent} cannot run ${modelOverride}, which is a ${owner} model.`);
+    const choice = resolveRuntime(config.agent, modelOverride, agentExplicit);
+    if (choice.error) {
+      log.error(choice.error);
       log.dim(`  Drop --agent to let the model choose, or pick a ${config.agent} model.`);
       process.exit(1);
     }
+    if (choice.switchedTo) {
+      log.info(`Using ${choice.switchedTo} — ${modelOverride} is a ${choice.switchedTo} model`);
+    }
+    config.agent = choice.agent;
     config[getAdapter(config.agent).modelKey] = modelOverride;
   }
 
