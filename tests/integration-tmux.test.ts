@@ -49,6 +49,17 @@ delete process.env.CMUX_SOCKET_PATH;
 const HAVE_TMUX = spawnSync("tmux", ["-V"], { stdio: "pipe" }).status === 0;
 const skip = HAVE_TMUX ? false : "tmux is not installed";
 
+// The cwd half of agentProcessAlive shells out to lsof, which is present on
+// macOS but not on a stock Linux CI runner. Skip rather than fail there: a
+// missing tool is not a regression, and asserting on it turns every CI run
+// into a blocked release.
+const HAVE_LSOF = spawnSync("lsof", ["-v"], { stdio: "pipe" }).status !== null;
+const skipLiveness = !HAVE_TMUX
+  ? "tmux is not installed"
+  : !HAVE_LSOF
+    ? "lsof is not installed"
+    : false;
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -208,7 +219,7 @@ describe("waitForAgent against a real pane", { skip }, () => {
 // ---------------------------------------------------------------------------
 // 2. Liveness must be scoped to the pane
 // ---------------------------------------------------------------------------
-describe("agentProcessAlive against a real pane", { skip }, () => {
+describe("agentProcessAlive against a real pane", { skip: skipLiveness }, () => {
   it("ignores an agent process that is not in this pane", () => {
     const id = agentId("alive");
     const wt = tempDir("alive-wt");
