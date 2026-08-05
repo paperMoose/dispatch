@@ -358,9 +358,12 @@ async function launchAgent(
       writeFileSync(pf, prompt);
       // Collapse newlines to spaces so cmuxSend doesn't fragment the prompt
       // into multiple submissions (Claude Code TUI treats \n as Enter/submit).
-      // cmuxSend appends a newline, which submits. A further Enter here was a
-      // second submission, landing after the agent may have opened a dialog.
+      // cmuxSend appends "\n", which submits in a shell but is only a soft
+      // line break inside a TUI composer, so an explicit key event is required.
+      // Removing it in 0.10.0 left the prompt sitting unsent in the composer.
       cmuxSend(wsId!, collapseForPane(prompt));
+      spawnSync("sleep", ["3"]);
+      cmuxSendKey(wsId!, "enter");
       // Clear dispatch status so cmux's native claude-hook takes over state tracking
       cmuxLog(wsId!, "Prompt sent — agent working");
       cmuxClearStatus(wsId!, "dispatch");
@@ -965,6 +968,9 @@ function sendToPane(id: string, text: string): void {
     const wsId = getCmuxWorkspaceId(id);
     if (!wsId) throw new Error(`No cmux workspace for agent '${id}'`);
     cmuxSend(wsId, oneLine);
+    // See launchAgent: the trailing newline does not submit in a TUI.
+    spawnSync("sleep", ["3"]);
+    cmuxSendKey(wsId, "enter");
     return;
   }
 
