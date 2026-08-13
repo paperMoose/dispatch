@@ -531,6 +531,27 @@ function codexSandboxFlags(
  *  meant for the composer, so suppress the check at the source. */
 const CODEX_NO_UPDATE_CHECK = "-c check_for_update_on_startup=false";
 
+/** The startup banner, painted once at the top of the session.
+ *
+ *  Readiness has to survive scrollback: `send` inspects only the last 40 lines
+ *  of the pane, so a marker painted once at startup vanishes as soon as the
+ *  agent does enough work to scroll it away. That alone left every later
+ *  `send` refused with "no codex prompt is visible" against a perfectly
+ *  healthy composer, so the banner is now only half the check. */
+const CODEX_BANNER = />_ OpenAI Codex \(v/;
+
+/** The composer's own status line — `<model> <effort> · <cwd>` — repainted
+ *  directly beneath the input on every frame, idle or mid-turn.
+ *
+ *  The cwd runs to the end of the line, and that is what separates it from
+ *  codex's mid-turn status, whose segments are dot-separated too
+ *  (`… · 1 background terminal running · /ps to view · /stop to close`).
+ *
+ *  This replaces a `Use /skills to list` marker that was worse than it looked:
+ *  that string is one of a dozen placeholder suggestions the composer rotates
+ *  through, so it made readiness pass at random rather than reliably. */
+const CODEX_COMPOSER = /^\s*\S.*\s·\s+~?\/\S*\s*$/m;
+
 /** Reasoning depth. Codex takes this as a config override rather than a flag.
  *  Claude has no CLI equivalent, so the setting is codex-only. */
 function codexEffortFlag(config: Config): string {
@@ -597,10 +618,8 @@ const codexAdapter: AgentAdapter = {
 
   shellPrefix: "",
 
-  // The header box and footer hint are only present once the TUI has painted;
-  // neither can appear in the echoed launch command.
   isReady(content) {
-    return />_ OpenAI Codex \(v|Use \/skills to list/.test(content);
+    return CODEX_BANNER.test(content) || CODEX_COMPOSER.test(content);
   },
 
   isBusy(content) {

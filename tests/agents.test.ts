@@ -309,6 +309,46 @@ const CODEX_WORKING = `${CODEX_READY}
 ◦ Working (11s • esc to interrupt)
 `;
 
+// The same session once it has done enough work to scroll the banner away.
+// Captured from codex-cli 0.146.0 through the 40-line window `send` reads.
+// This is the frame every `dispatch send` was refused against: a live, idle
+// composer waiting for input, with no startup marker left on screen.
+const CODEX_READY_SCROLLED = `
+  258
+  259
+  260
+
+───────────────────────────────────────────────────────────────────────────
+
+
+› Run /review on my current changes
+
+  gpt-5.6-sol xhigh · ~/git/dispatch/.worktrees/send-probe2
+`;
+
+const CODEX_WORKING_SCROLLED = `
+› Run: sleep 20 && echo SLEPT
+
+• Running it now.
+
+• Working (5s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+
+
+› Run /review on my current changes
+
+  gpt-5.6-sol xhigh · ~/git/dispatch/.worktrees/send-probe2
+`;
+
+// The trust dialog, rendered before the composer exists. dismissStartupDialog
+// stands down as soon as isReady passes, so a readiness marker that showed up
+// here would leave the dialog unanswered and hang the launch instead.
+const CODEX_TRUST_PROMPT = `
+  Do you trust the contents of this directory?
+  Working with untrusted contents comes with higher risk of prompt injection.
+› 1. Yes, continue
+  2. No, exit
+`;
+
 const CODEX_UPDATE_PROMPT = `
   ✨ Update available! 0.144.3 -> 0.145.0
   Release notes: https://github.com/openai/codex/releases/latest
@@ -331,6 +371,32 @@ describe("codex TUI detection", () => {
     assert.ok(!codex.isReady(echoed));
   });
 
+  // The regression: `send` reads 40 lines, so the startup banner is gone from
+  // any agent that has done real work, and every message was refused against a
+  // composer that was sitting there ready for it.
+  it("still recognizes the composer once the banner has scrolled away", () => {
+    assert.ok(!/OpenAI Codex/.test(CODEX_READY_SCROLLED));
+    assert.ok(codex.isReady(CODEX_READY_SCROLLED));
+    assert.ok(codex.isReady(CODEX_WORKING_SCROLLED));
+  });
+
+  // The old marker was one of a dozen suggestions the composer rotates
+  // through, so readiness depended on which one happened to be painted.
+  it("does not decide readiness from the rotating placeholder suggestion", () => {
+    assert.ok(!/Use \/skills to list/.test(CODEX_READY_SCROLLED));
+    assert.ok(
+      !codex.isReady("  Tip: run `Use /skills to list available skills` to see them"),
+    );
+  });
+
+  // Codex's mid-turn status is dot-separated too. Only the composer's line
+  // ends in the cwd, which is what keeps that status out of the check.
+  it("does not read the mid-turn status line as a composer", () => {
+    const status =
+      "• Working (5s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close";
+    assert.ok(!codex.isReady(status));
+  });
+
   it("detects a working turn", () => {
     assert.ok(codex.isBusy(CODEX_WORKING));
     assert.ok(!codex.isBusy(CODEX_READY));
@@ -341,6 +407,14 @@ describe("codex TUI detection", () => {
   it("dismisses the update menu instead of pasting into it", () => {
     assert.equal(codex.dismissStartupDialog(CODEX_UPDATE_PROMPT), "2");
     assert.equal(codex.dismissStartupDialog(CODEX_READY), null);
+  });
+
+  // Readiness stands the dismissal down, so a marker that matched a dialog
+  // would trade a refused `send` for a launch that hangs on an unanswered one.
+  it("does not read a startup dialog as a ready composer", () => {
+    assert.ok(!codex.isReady(CODEX_TRUST_PROMPT));
+    assert.ok(!codex.isReady(CODEX_UPDATE_PROMPT));
+    assert.equal(codex.dismissStartupDialog(CODEX_TRUST_PROMPT), "1");
   });
 });
 
