@@ -1374,6 +1374,17 @@ export function cmdCleanup(args: string[], config: Config): void {
   }
 }
 
+/** True if the worktree has uncommitted changes. removeWorktree() runs
+ * `git worktree remove --force`, which discards them without warning, so any
+ * automatic teardown has to check this first. */
+function hasUncommittedChanges(wtPath: string): boolean {
+  const r = spawnSync("git", ["-C", wtPath, "status", "--porcelain"], {
+    stdio: "pipe",
+  });
+  if (r.status !== 0) return true; // can't tell — assume dirty and keep it
+  return (r.stdout?.toString() || "").trim().length > 0;
+}
+
 /** Check if a branch was merged — tries git branch --merged, then gh pr status. */
 function isBranchMerged(branch: string, baseBranch: string): boolean {
   // 1. Check if branch is merged into base via git
@@ -1382,7 +1393,15 @@ function isBranchMerged(branch: string, baseBranch: string): boolean {
     { stdio: "pipe" },
   );
   const mergedBranches = r.stdout?.toString() || "";
-  if (mergedBranches.split("\n").some((b) => b.trim() === branch)) {
+  // `git branch --merged` decorates the current branch with "* " and a branch
+  // checked out in another worktree with "+ ". Every dispatch worktree branch
+  // is "+"-prefixed by definition, so the marker has to come off before we
+  // compare or this check can never match a live worktree.
+  if (
+    mergedBranches
+      .split("\n")
+      .some((b) => b.replace(/^[*+]?\s*/, "").trim() === branch)
+  ) {
     return true;
   }
 
@@ -1421,9 +1440,18 @@ export function cmdPrune(args: string[], config: Config): void {
 
   // Find stale worktrees
   const stale: { name: string; reason: string; merged: boolean }[] = [];
+  const skippedDirty: string[] = [];
   if (mergedOnly) log.info(`Checking ${entries.length} worktrees for merged PRs...`);
   for (const name of entries) {
     const hasSession = sessionExists(name);
+
+    // Never auto-remove a worktree with uncommitted changes. removeWorktree()
+    // runs `git worktree remove --force`, which discards them with no warning
+    // and no way back — a merged branch says nothing about unstaged work.
+    if (hasUncommittedChanges(worktreePath(name, config))) {
+      skippedDirty.push(name);
+      continue;
+    }
 
     // --merged: check all worktrees regardless of session state
     if (mergedOnly) {
@@ -1456,6 +1484,12 @@ export function cmdPrune(args: string[], config: Config): void {
 
     const reason = !hasSession ? "no session" : "idle";
     stale.push({ name, reason, merged });
+  }
+
+  if (skippedDirty.length > 0) {
+    log.warn(
+      `Skipped ${skippedDirty.length} worktree(s) with uncommitted changes: ${skippedDirty.join(", ")}`,
+    );
   }
 
   if (stale.length === 0) {
@@ -1803,6 +1837,12 @@ export function cmdNotifyDone(args: string[], config: Config): void {
 
   // Auto-prune if the branch was merged
   if (isBranchMerged(agentId, config.baseBranch)) {
+    if (hasUncommittedChanges(wtPath)) {
+      log.warn(
+        `Branch '${agentId}' is merged but the worktree has uncommitted changes — keeping it. Clean it up with: dispatch cleanup ${agentId}`,
+      );
+      return;
+    }
     cmuxUpdateState(agentId, wtPath, "merged", "Branch merged — auto-pruning");
     log.info(`Branch '${agentId}' was merged — auto-pruning worktree`);
     if (sessionExists(agentId)) {
