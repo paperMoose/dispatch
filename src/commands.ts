@@ -361,7 +361,10 @@ async function launchAgent(
       // cmuxSend appends "\n", which submits in a shell but is only a soft
       // line break inside a TUI composer, so an explicit key event is required.
       // Removing it in 0.10.0 left the prompt sitting unsent in the composer.
-      cmuxSend(wsId!, collapseForPane(prompt));
+      // Over MAX_PANE_WRITE_BYTES the pty drops the tail with no error, so a
+      // long brief is pointed at the file just written instead of typed: the
+      // agent then reads it with its newlines and numbering intact.
+      cmuxSend(wsId!, paneDelivery(prompt, pf).inline);
       spawnSync("sleep", ["3"]);
       cmuxSendKey(wsId!, "enter");
       // Clear dispatch status so cmux's native claude-hook takes over state tracking
@@ -961,8 +964,49 @@ export function collapseForPane(text: string): string {
   return text.replace(/\s*\n+\s*/g, " ").trim();
 }
 
-function sendToPane(id: string, text: string): void {
+/** Largest payload we will type into a pane in one write.
+ *
+ *  A pty in canonical mode drops whatever does not fit its input buffer, and
+ *  it drops it SILENTLY: the write returns success, the agent receives a
+ *  prefix, and nothing anywhere reports a short read. Measured on cmux
+ *  2026-08-31 — a 3500-byte payload arrives whole, 4000 does not, which puts
+ *  the real ceiling at the classic 4096-byte buffer. The margin below covers
+ *  the marker text and any per-write framing the terminal adds. */
+export const MAX_PANE_WRITE_BYTES = 2500;
+
+/** What to actually type, given a message of any size.
+ *
+ *  Over the cap the message goes to a file and the pane gets a pointer, so
+ *  the agent reads the whole thing — with its newlines and numbering intact,
+ *  which `collapseForPane` would otherwise flatten away. Split out from
+ *  `sendToPane` so the size decision is testable without a terminal. */
+export function paneDelivery(
+  text: string,
+  handoffPath: string,
+): { inline: string; needsFile: boolean; body: string } {
   const oneLine = collapseForPane(text);
+  if (Buffer.byteLength(oneLine, "utf8") <= MAX_PANE_WRITE_BYTES) {
+    return { inline: oneLine, needsFile: false, body: text };
+  }
+  return {
+    inline:
+      `Your instructions were too long to type into this pane, so they are in ` +
+      `${handoffPath} instead. Read that file now and follow it. It is complete; ` +
+      `nothing was truncated.`,
+    needsFile: true,
+    body: text,
+  };
+}
+
+function sendToPane(id: string, text: string, wtPath: string): void {
+  // A long message is handed over as a file rather than typed: see
+  // MAX_PANE_WRITE_BYTES for why a big write is lost without any error.
+  const handoff = join(wtPath, `.dispatch-message-${Date.now()}.md`);
+  const plan = paneDelivery(text, handoff);
+  if (plan.needsFile) {
+    writeFileSync(handoff, plan.body, { mode: 0o600 });
+  }
+  const oneLine = plan.inline;
 
   if (useCmux()) {
     const wsId = getCmuxWorkspaceId(id);
@@ -1066,7 +1110,7 @@ export function cmdSend(args: string[], config: Config): void {
     log.warn(`${adapter.bin} is mid-turn; the message will queue until it finishes`);
   }
 
-  sendToPane(id, message);
+  sendToPane(id, message, wtPath);
   log.ok(`Sent to ${fmt.BOLD}${id}${fmt.NC}`);
   log.dim(`  ${message.slice(0, 120)}`);
 

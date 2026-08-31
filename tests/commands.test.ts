@@ -9,6 +9,8 @@ import {
   buildClaudeCmd,
   interactiveClaudeCmd,
   collapseForPane,
+  paneDelivery,
+  MAX_PANE_WRITE_BYTES,
   readAgentState,
   TICKET_RE,
 } from "../src/commands.js";
@@ -176,5 +178,57 @@ describe("readAgentState", () => {
     const dir = mkdtempSync(join(tmpdir(), "dispatch-marker-"));
     writeFileSync(join(dir, ".dispatch-agent"), "{not json");
     assert.deepEqual(readAgentState(dir), { agent: "", mode: null });
+  });
+});
+
+describe("paneDelivery", () => {
+  const HANDOFF = "/tmp/wt/.dispatch-message-1.md";
+
+  it("types a short message straight into the pane", () => {
+    const plan = paneDelivery("do the thing", HANDOFF);
+    assert.equal(plan.needsFile, false);
+    assert.equal(plan.inline, "do the thing");
+  });
+
+  it("hands over a message the pty would silently cut", () => {
+    // Measured on cmux 2026-08-31: 3500 bytes arrive whole, 4000 do not, and
+    // the write reports success either way. A brief this size was delivered
+    // headless twice and the agent acted on the surviving prefix.
+    const long = "step one. " + "x".repeat(6000) + " step nine.";
+    const plan = paneDelivery(long, HANDOFF);
+    assert.equal(plan.needsFile, true);
+    assert.ok(
+      plan.inline.includes(HANDOFF),
+      "the pointer must name the file the agent has to read",
+    );
+    assert.equal(plan.body, long, "the file gets the message unflattened");
+  });
+
+  it("never types more than one pty buffer can hold", () => {
+    // The property that matters: whatever comes back for the pane is small
+    // enough to survive the write. Sizes either side of the cap and far past it.
+    for (const n of [10, 2000, 2600, 5000, 200000]) {
+      const plan = paneDelivery("y".repeat(n), HANDOFF);
+      assert.ok(
+        Buffer.byteLength(plan.inline, "utf8") <= MAX_PANE_WRITE_BYTES,
+        `a ${n}-byte message produced a ${Buffer.byteLength(plan.inline, "utf8")}-byte write`,
+      );
+    }
+  });
+
+  it("keeps the newlines the pane would have flattened", () => {
+    // Why a file beats chunking: numbered instructions stay numbered, and
+    // that is what an agent loses when a long brief is collapsed to one line.
+    const numbered = Array.from({ length: 400 }, (_, i) => `${i + 1}. item`).join("\n");
+    const plan = paneDelivery(numbered, HANDOFF);
+    assert.equal(plan.needsFile, true);
+    assert.ok(plan.body.includes("\n"), "the handed-over body keeps its line breaks");
+  });
+
+  it("measures the cap in bytes, not characters", () => {
+    // A multi-byte character counts against the pty buffer at its real width.
+    const wide = "\u00e9".repeat(MAX_PANE_WRITE_BYTES - 100);
+    const plan = paneDelivery(wide, HANDOFF);
+    assert.equal(plan.needsFile, true, "2x-width text over the cap must hand over");
   });
 });
