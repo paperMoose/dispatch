@@ -25,6 +25,7 @@ import {
   cmdScheduleShouldFire,
   cmdScheduleRecordSuccess,
   cmdScheduledTarget,
+  cmdThread,
 } from "./commands.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -47,6 +48,11 @@ Commands:
   dispatch status <id>                     Structured summary: turns, files, commits, last actions
   dispatch logs <id>                       Tail a headless agent's output
   dispatch send <id> "<msg>"               Post a message to a running interactive agent
+  dispatch thread new <id> <id> [--topic X] Start a shared buffer two or more agents confer in
+  dispatch thread post <tid> --from <id> "<msg>"  Post to a thread; delivers to the other members
+  dispatch thread read <tid>               Print the whole conversation
+  dispatch thread add <tid> <id>...        Add agents to an existing thread
+  dispatch thread list                     Show all threads
   dispatch stop <id>                       Send Ctrl-C and kill the tmux window
   dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
@@ -189,6 +195,10 @@ async function main(): Promise<void> {
       break;
     case "send":
       cmdSend(rest, config);
+      break;
+    case "thread":
+    case "threads":
+      cmdThread(rest, config);
       break;
     case "history":
       cmdHistory(rest);

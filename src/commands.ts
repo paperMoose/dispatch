@@ -72,6 +72,19 @@ import {
   getCmuxWorkspaceId,
 } from "./shell.js";
 import {
+  createThread,
+  readThread,
+  appendPost,
+  addMembers,
+  listThreads,
+  recipientsFor,
+  deliveryText,
+  parseMentions,
+  threadExists,
+  isValidThreadId,
+  type ThreadPost,
+} from "./threads.js";
+import {
   cmuxSend,
   cmuxSendKey,
   cmuxPasteBuffer,
@@ -2769,4 +2782,190 @@ export function cmdSchedule(args: string[]): void {
     log.error((err as Error).message);
     process.exit(1);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Threads — a shared buffer several agents can confer in
+// ---------------------------------------------------------------------------
+
+/** Deliver one post to every recipient's pane.
+ *
+ *  Returns the members it could not reach, rather than throwing: a thread of
+ *  four agents where one has exited must still deliver to the other three,
+ *  and the caller has to be able to say which one was missed. Silently
+ *  dropping a recipient is how a conversation loses a participant nobody
+ *  notices is gone. */
+export function deliverPost(
+  meta: { id: string; topic: string; members: string[]; created: string },
+  post: ThreadPost,
+  config: Config,
+): { delivered: string[]; failed: { id: string; why: string }[] } {
+  const delivered: string[] = [];
+  const failed: { id: string; why: string }[] = [];
+
+  for (const target of recipientsFor(meta, post.from, post.to)) {
+    if (!sessionExists(target)) {
+      failed.push({ id: target, why: "not running" });
+      continue;
+    }
+    const wt = worktreePath(target, config);
+    const state = readAgentState(wt);
+    if (state.mode === "headless") {
+      failed.push({ id: target, why: "headless — cannot receive messages" });
+      continue;
+    }
+    const adapter = getAdapter(state.agent || config.agent);
+    if (!agentProcessAlive(wt, adapter.bin, target)) {
+      failed.push({ id: target, why: "no live agent process" });
+      continue;
+    }
+    try {
+      sendToPane(target, deliveryText(meta, post, target), wt);
+      delivered.push(target);
+    } catch (e) {
+      failed.push({ id: target, why: String(e) });
+    }
+  }
+  return { delivered, failed };
+}
+
+export function cmdThread(args: string[], config: Config): void {
+  const sub = args[0];
+  const rest = args.slice(1);
+
+  if (sub === "new") {
+    const topicIdx = rest.indexOf("--topic");
+    let topic = "";
+    if (topicIdx !== -1) {
+      topic = rest[topicIdx + 1] || "";
+      rest.splice(topicIdx, 2);
+    }
+    const idIdx = rest.indexOf("--id");
+    let idOverride: string | undefined;
+    if (idIdx !== -1) {
+      idOverride = rest[idIdx + 1];
+      rest.splice(idIdx, 2);
+    }
+    const members = rest.filter((a) => !a.startsWith("--"));
+    if (members.length < 1) {
+      log.error('Usage: dispatch thread new <agent-id> [<agent-id>...] [--topic "..."]');
+      process.exit(1);
+    }
+    if (idOverride && !isValidThreadId(idOverride)) {
+      log.error(`Invalid thread id '${idOverride}': use a-z, 0-9 and dashes.`);
+      process.exit(1);
+    }
+    const meta = createThread(members, topic, idOverride);
+    log.ok(`Thread ${fmt.BOLD}${meta.id}${fmt.NC} created`);
+    log.dim(`  members: ${meta.members.join(", ")}`);
+    if (meta.topic) log.dim(`  topic: ${meta.topic}`);
+    log.dim(`  post:   dispatch thread post ${meta.id} --from <you> "message"`);
+    return;
+  }
+
+  if (sub === "post") {
+    const id = rest[0];
+    if (!id || !threadExists(id)) {
+      log.error(`No such thread: ${id || "(none given)"}`);
+      log.dim("  List them with: dispatch thread list");
+      process.exit(1);
+    }
+    let from = "human";
+    const fromIdx = rest.indexOf("--from");
+    if (fromIdx !== -1) {
+      from = rest[fromIdx + 1] || "human";
+      rest.splice(fromIdx, 2);
+    }
+    let text: string;
+    const fileIdx = rest.indexOf("--message-file");
+    if (fileIdx !== -1) {
+      const path = rest[fileIdx + 1];
+      if (!path || !existsSync(path)) {
+        log.error(`Message file not found: ${path}`);
+        process.exit(1);
+      }
+      text = readFileSync(path, "utf-8").trim();
+      rest.splice(fileIdx, 2);
+    } else {
+      text = rest.slice(1).join(" ");
+    }
+    if (!text) {
+      log.error('Usage: dispatch thread post <thread-id> --from <id> "message"');
+      process.exit(1);
+    }
+
+    const t = readThread(id)!;
+    // An @mention addresses part of the thread; without one everyone gets it.
+    const mentioned = parseMentions(text).filter((m) => t.meta.members.includes(m));
+    const post: ThreadPost = {
+      ts: new Date().toISOString(),
+      from,
+      text,
+      ...(mentioned.length ? { to: mentioned } : {}),
+    };
+    // Written before delivery: the transcript is the record, and a delivery
+    // that fails must not also lose what was said.
+    appendPost(id, post);
+
+    const { delivered, failed } = deliverPost(t.meta, post, config);
+    log.ok(`Posted to ${fmt.BOLD}${id}${fmt.NC} as ${from}`);
+    if (delivered.length) log.dim(`  delivered: ${delivered.join(", ")}`);
+    for (const f of failed) log.warn(`  not delivered to ${f.id}: ${f.why}`);
+    if (!delivered.length && !failed.length) {
+      log.dim("  nobody else is in this thread yet");
+    }
+    return;
+  }
+
+  if (sub === "read") {
+    const id = rest[0];
+    const t = id ? readThread(id) : null;
+    if (!t) {
+      log.error(`No such thread: ${id || "(none given)"}`);
+      process.exit(1);
+    }
+    log.info(`Thread ${t.meta.id}${t.meta.topic ? ` — ${t.meta.topic}` : ""}`);
+    log.dim(`  members: ${t.meta.members.join(", ")}`);
+    for (const p of t.posts) {
+      const who = p.to?.length ? `${p.from} → ${p.to.join(", ")}` : p.from;
+      console.log(`\n${fmt.BOLD}${who}${fmt.NC} ${fmt.DIM}${p.ts}${fmt.NC}\n${p.text}`);
+    }
+    if (!t.posts.length) log.dim("  (no messages yet)");
+    return;
+  }
+
+  if (sub === "add") {
+    const id = rest[0];
+    if (!id || !threadExists(id)) {
+      log.error(`No such thread: ${id || "(none given)"}`);
+      process.exit(1);
+    }
+    const members = rest.slice(1).filter((a) => !a.startsWith("--"));
+    if (!members.length) {
+      log.error("Usage: dispatch thread add <thread-id> <agent-id>...");
+      process.exit(1);
+    }
+    const next = addMembers(id, members);
+    log.ok(`Added ${members.join(", ")} to ${id}`);
+    log.dim(`  members: ${next.join(", ")}`);
+    return;
+  }
+
+  if (sub === "list" || !sub) {
+    const all = listThreads();
+    if (!all.length) {
+      log.dim("No threads. Create one: dispatch thread new <agent-id> <agent-id>");
+      return;
+    }
+    for (const m of all) {
+      console.log(
+        `${fmt.BOLD}${m.id}${fmt.NC}  ${m.members.join(", ")}${m.topic ? `  ${fmt.DIM}${m.topic}${fmt.NC}` : ""}`,
+      );
+    }
+    return;
+  }
+
+  log.error(`Unknown thread command: ${sub}`);
+  log.dim("  new | post | read | add | list");
+  process.exit(1);
 }
