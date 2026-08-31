@@ -26,6 +26,8 @@ import {
   cmdScheduleRecordSuccess,
   cmdScheduledTarget,
   cmdThread,
+  cmdDirectory,
+  cmdDnd,
 } from "./commands.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -48,11 +50,13 @@ Commands:
   dispatch status <id>                     Structured summary: turns, files, commits, last actions
   dispatch logs <id>                       Tail a headless agent's output
   dispatch send <id> "<msg>"               Post a message to a running interactive agent
+  dispatch directory [--json]              Who is running, what they are on, who can be reached
   dispatch thread new <id> <id> [--topic X] Start a shared buffer two or more agents confer in
   dispatch thread post <tid> --from <id> "<msg>"  Post to a thread; delivers to the other members
   dispatch thread read <tid>               Print the whole conversation
   dispatch thread add <tid> <id>...        Add agents to an existing thread
   dispatch thread list                     Show all threads
+  dispatch dnd <id> on|off [--reason X]    Hold thread posts for an agent that must not be interrupted
   dispatch stop <id>                       Send Ctrl-C and kill the tmux window
   dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
@@ -88,6 +92,19 @@ Lifecycle:
   4. stop   — Interrupt the agent (worktree and branch preserved)
   5. resume — Pick up where it left off (claude --continue / codex resume)
   6. cleanup — Remove worktree when done (--delete-branch to also delete the branch)
+
+Agent Conversations:
+  dispatch directory                    See who is running and what they are working on
+  dispatch thread new a b --topic "the auth refactor"
+  dispatch thread post t-4f2a --from a "@b are you touching session.ts?"
+  dispatch thread read t-4f2a           The whole conversation, for anyone joining late
+
+  Every post lands in a shared buffer under .dispatch-threads/ and is typed into
+  the other members' panes with the thread id, so they can answer. @mentions
+  address a subset. An agent on do-not-disturb still gets the buffer entry and
+  is handed everything it missed when do-not-disturb comes off. A reply chain
+  stops being delivered after --max-hops replies (default 12), so two agents
+  cannot keep each other awake forever.
 
 Input Types:
   Linear ticket    dispatch run HEY-837              Fetches title + description from Linear
@@ -199,6 +216,13 @@ async function main(): Promise<void> {
     case "thread":
     case "threads":
       cmdThread(rest, config);
+      break;
+    case "directory":
+    case "dir":
+      cmdDirectory(rest, config);
+      break;
+    case "dnd":
+      cmdDnd(rest, config);
       break;
     case "history":
       cmdHistory(rest);

@@ -33,7 +33,9 @@ import {
   waitForAgent,
   worktreePath,
 } from "../src/shell.js";
-import { cmdSend } from "../src/commands.js";
+import { cmdSend, cmdThread, cmdDnd, cmdDirectory } from "../src/commands.js";
+import { pendingFor, readThread, threadsDir } from "../src/threads.js";
+import type { DirectoryEntry } from "../src/directory.js";
 import { getAdapter } from "../src/agents.js";
 import type { Config } from "../src/config.js";
 
@@ -397,6 +399,7 @@ const ARTIFACTS = [
   ".dispatch-prompt.txt",
   ".dispatch-cmux-workspace",
   ".dispatch.log",
+  ".dispatch-dnd",
 ];
 
 describe("excludeDispatchArtifacts in a real repository", () => {
@@ -475,5 +478,275 @@ describe("excludeDispatchArtifacts in a real repository", () => {
       "",
       "the repo's own exclusions must still apply alongside dispatch's",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. Two agents confer in a shared thread
+// ---------------------------------------------------------------------------
+//
+// The unit tests drive delivery through a fake transport. What they cannot
+// show is that a post reaches a real pane, that the pane of an agent on
+// do-not-disturb stays untouched while the buffer keeps the post, and that the
+// held post is handed over when do-not-disturb comes off. That is the whole
+// feature, and all of it happens in the terminal.
+
+/** A stand-in for an agent, satisfying the same gates a real one does: a
+ *  process named `claude` inside the pane, a painted readiness marker, and no
+ *  dialog. It records each submitted line, so what the agent "got" is a file
+ *  on disk rather than a claim about a call. */
+function startFakeAgent(repo: string, id: string, config: Config): { wt: string; received: string } {
+  const wt = worktreePath(id, config);
+  mkdirSync(join(wt, "bin"), { recursive: true });
+  writeFileSync(
+    join(wt, ".dispatch-agent"),
+    JSON.stringify({ agent: "claude", mode: "interactive" }) + "\n",
+  );
+
+  const binPath = join(wt, "bin", "claude");
+  symlinkSync("/bin/sh", binPath);
+
+  const received = join(wt, "received.txt");
+  const receiver = join(wt, "receiver.sh");
+  writeFileSync(
+    receiver,
+    [
+      `printf 'Claude Code v9.9.9\\n? for shortcuts\\n'`,
+      `while IFS= read -r line; do printf '<<%s>>\\n' "$line" >> '${received}'; done`,
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(received, "");
+
+  startPane(id, wt, `${binPath} ${receiver}`);
+  assert.ok(
+    until(10, () => capture(id).includes("? for shortcuts")),
+    `precondition: ${id} should have painted its readiness marker`,
+  );
+  return { wt, received };
+}
+
+/** Every line the fake agent submitted, joined. */
+function heard(received: string): string {
+  return readFileSync(received, "utf-8");
+}
+
+/** The delivery record the buffer holds for a post. */
+function deliveryOf(dir: string, threadId: string, postId: string) {
+  const t = readThread(dir, threadId)!;
+  return t.deliveries.find((d) => d.post === postId)!;
+}
+
+describe("agent threads through real panes", { skip }, () => {
+  it("delivers a post to the other members, not the sender, and names who was missed", () => {
+    const repo = tempDir("thread-post");
+    initRepo(repo);
+    const alpha = agentId("alpha");
+    const bravo = agentId("bravo");
+    const gone = agentId("gone"); // never started: the exited member
+
+    const cwdBefore = process.cwd();
+    const realExit = process.exit;
+    (process as unknown as { exit: (code?: number) => never }).exit = ((code?: number) => {
+      throw new Error(`command called process.exit(${code})`);
+    }) as never;
+
+    try {
+      process.chdir(repo);
+      const config = makeConfig();
+      const a = startFakeAgent(repo, alpha, config);
+      const b = startFakeAgent(repo, bravo, config);
+      // The exited member has a worktree but no session, which is exactly what
+      // a finished agent leaves behind.
+      mkdirSync(worktreePath(gone, config), { recursive: true });
+
+      try {
+        const tid = `t-${randomBytes(3).toString("hex")}`;
+        cmdThread(["new", alpha, bravo, gone, "--id", tid, "--topic", "session.ts"], config);
+
+        const messageFile = join(repo, "post.txt");
+        writeFileSync(messageFile, "I am about to change session.ts — anyone else in there?");
+        cmdThread(["post", tid, "--from", alpha, "--message-file", messageFile], config);
+
+        assert.ok(
+          until(15, () => heard(b.received).includes("session.ts")),
+          "the post should have been typed into the other member's pane",
+        );
+        const got = heard(b.received);
+        assert.ok(
+          got.includes("I am about to change session.ts"),
+          "the recipient must get what was said",
+        );
+        assert.ok(got.includes(tid), "and the thread id, which is how it replies");
+        assert.ok(
+          got.includes(`--from ${bravo}`),
+          "addressed as itself, so a reply is attributed correctly",
+        );
+
+        // A late write is the failure this catches: the sender's own pane.
+        sleep(2);
+        assert.equal(
+          heard(a.received),
+          "",
+          "the author's pane must never receive the author's own post",
+        );
+
+        const dir = threadsDir();
+        const t = readThread(dir, tid)!;
+        assert.equal(t.posts.length, 1, "the buffer holds the post");
+        const record = deliveryOf(dir, tid, t.posts[0].id);
+        assert.deepEqual(record.delivered, [bravo]);
+        assert.deepEqual(
+          record.undelivered.map((u) => u.id),
+          [gone],
+          "the member that could not be reached is recorded, not dropped",
+        );
+        assert.ok(record.undelivered[0].why.includes("not running"));
+      } finally {
+        killPane(alpha);
+        killPane(bravo);
+      }
+    } finally {
+      process.exit = realExit;
+      process.chdir(cwdBefore);
+    }
+  });
+
+  it("holds a post for a do-not-disturb agent and hands it over when it comes off", () => {
+    const repo = tempDir("thread-dnd");
+    initRepo(repo);
+    const alpha = agentId("alpha");
+    const quiet = agentId("quiet");
+
+    const cwdBefore = process.cwd();
+    const realExit = process.exit;
+    (process as unknown as { exit: (code?: number) => never }).exit = ((code?: number) => {
+      throw new Error(`command called process.exit(${code})`);
+    }) as never;
+
+    try {
+      process.chdir(repo);
+      const config = makeConfig();
+      startFakeAgent(repo, alpha, config);
+      const q = startFakeAgent(repo, quiet, config);
+
+      try {
+        cmdDnd([quiet, "on", "--reason", "mid-migration"], config);
+
+        const tid = `t-${randomBytes(3).toString("hex")}`;
+        cmdThread(["new", alpha, quiet, "--id", tid], config);
+        const messageFile = join(repo, "post.txt");
+        writeFileSync(messageFile, "the schema change is ready for review");
+        cmdThread(["post", tid, "--from", alpha, "--message-file", messageFile], config);
+
+        // Long enough that a delivery would have landed: sendToPane waits three
+        // seconds before submitting, so a shorter window would pass either way.
+        sleep(6);
+        assert.equal(
+          heard(q.received),
+          "",
+          "an agent on do-not-disturb must not be written to",
+        );
+
+        const dir = threadsDir();
+        const t = readThread(dir, tid)!;
+        assert.equal(
+          t.posts[0].text,
+          "the schema change is ready for review",
+          "the buffer keeps the post regardless, so nothing said is lost",
+        );
+        const record = deliveryOf(dir, tid, t.posts[0].id);
+        assert.deepEqual(record.delivered, []);
+        assert.ok(record.undelivered[0].why.includes("do not disturb"));
+        assert.deepEqual(
+          pendingFor(readThread(dir, tid)!, quiet).map((p) => p.text),
+          ["the schema change is ready for review"],
+          "and it stays owed to them",
+        );
+
+        // Coming off do-not-disturb delivers everything that was held.
+        cmdDnd([quiet, "off"], config);
+        assert.ok(
+          until(15, () => heard(q.received).includes("schema change")),
+          "what arrived during do-not-disturb should be handed over on the way out",
+        );
+        assert.deepEqual(
+          pendingFor(readThread(dir, tid)!, quiet),
+          [],
+          "and stop being owed once it has landed",
+        );
+      } finally {
+        killPane(alpha);
+        killPane(quiet);
+      }
+    } finally {
+      process.exit = realExit;
+      process.chdir(cwdBefore);
+    }
+  });
+
+  it("lists what each agent is working on, and who can be reached", () => {
+    const repo = tempDir("thread-dir");
+    initRepo(repo);
+    const alpha = agentId("alpha");
+    const quiet = agentId("quiet");
+
+    const cwdBefore = process.cwd();
+    const realExit = process.exit;
+    const realLog = console.log;
+    (process as unknown as { exit: (code?: number) => never }).exit = ((code?: number) => {
+      throw new Error(`command called process.exit(${code})`);
+    }) as never;
+
+    try {
+      process.chdir(repo);
+      const config = makeConfig();
+      const a = startFakeAgent(repo, alpha, config);
+      const q = startFakeAgent(repo, quiet, config);
+      // What dispatch writes at launch, and the directory's first source for
+      // what an agent is working on.
+      writeFileSync(join(a.wt, ".dispatch-prompt.txt"), "# Fix the auth bug\n\nDetails follow.");
+      cmdDnd([quiet, "on", "--reason", "mid-migration"], config);
+
+      try {
+        let out = "";
+        console.log = (s?: unknown) => {
+          out += String(s ?? "") + "\n";
+        };
+        try {
+          cmdDirectory(["--json"], config);
+        } finally {
+          console.log = realLog;
+        }
+
+        // Nothing but JSON on stdout: an agent pipes this straight into a
+        // parser, and one banner line in front of it makes the whole thing
+        // unreadable.
+        assert.ok(out.trim().startsWith("["), `--json printed something else first: ${out.slice(0, 120)}`);
+        const entries = JSON.parse(out.trim()) as DirectoryEntry[];
+        const mine = entries.find((e) => e.id === alpha);
+        assert.ok(mine, `the directory should list ${alpha}`);
+        assert.equal(
+          mine!.working,
+          "Fix the auth bug",
+          "what it is working on comes from the brief it was launched with",
+        );
+        assert.equal(mine!.workingFrom, "prompt");
+        assert.equal(mine!.reachable, true);
+
+        const held = entries.find((e) => e.id === quiet);
+        assert.ok(held, `the directory should list ${quiet}`);
+        assert.equal(held!.dnd, true);
+        assert.equal(held!.reachable, false, "an agent nobody should ping reads as unreachable");
+        assert.ok(held!.unreachable!.includes("do not disturb"));
+      } finally {
+        killPane(alpha);
+        killPane(quiet);
+      }
+    } finally {
+      console.log = realLog;
+      process.exit = realExit;
+      process.chdir(cwdBefore);
+    }
   });
 });

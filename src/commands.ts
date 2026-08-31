@@ -75,15 +75,33 @@ import {
   createThread,
   readThread,
   appendPost,
+  recordDelivery,
   addMembers,
   listThreads,
   recipientsFor,
   deliveryText,
+  catchUpText,
+  pendingFor,
   parseMentions,
   threadExists,
+  threadsDir,
   isValidThreadId,
+  isValidMemberId,
+  DEFAULT_MAX_HOPS,
+  type Thread,
+  type ThreadMeta,
   type ThreadPost,
 } from "./threads.js";
+import {
+  readDnd,
+  setDnd,
+  clearDnd,
+  agentIdFromPath,
+  describeWork,
+  formatDirectory,
+  directoryJson,
+  type DirectoryEntry,
+} from "./directory.js";
 import {
   cmuxSend,
   cmuxSendKey,
@@ -1123,6 +1141,16 @@ export function cmdSend(args: string[], config: Config): void {
     log.warn(`${adapter.bin} is mid-turn; the message will queue until it finishes`);
   }
 
+  // Do-not-disturb holds back agent-to-agent thread posts, not this: a person
+  // steering an agent they are watching is the case it must never block. Say
+  // it out loud so the interruption is a choice rather than an accident.
+  const dnd = readDnd(wtPath);
+  if (dnd) {
+    log.warn(
+      `${id} is on do-not-disturb${dnd.reason ? ` (${dnd.reason})` : ""}; sending anyway`,
+    );
+  }
+
   sendToPane(id, message, wtPath);
   log.ok(`Sent to ${fmt.BOLD}${id}${fmt.NC}`);
   log.dim(`  ${message.slice(0, 120)}`);
@@ -2077,6 +2105,29 @@ dispatch cleanup --all --delete-branch                # Clean up everything
 dispatch prune --merged --delete-branch               # Remove worktrees with merged PRs
 \`\`\`
 
+**Agents can talk to each other.** \`dispatch directory\` lists every running agent, what it is working on (read from its brief, its history event, or its last message — nothing to keep up to date by hand) and whether it can be reached; \`--json\` for a machine-readable form. A thread is a shared buffer several agents confer in: each post is appended to \`.dispatch-threads/<id>.jsonl\` and typed into the other members' panes carrying the thread id, so they can reply into the same buffer.
+
+\`\`\`bash
+dispatch directory                                    # who is running, what they're on, who is reachable
+dispatch directory --json                             # same, for an agent to read
+
+dispatch thread new hey-837 hey-838 --topic "auth refactor"   # prints the thread id, e.g. t-4f2a
+dispatch thread post t-4f2a --from hey-837 "I'm changing session.ts — @hey-838 does that hit you?"
+dispatch thread read t-4f2a                           # the whole conversation
+dispatch thread add t-4f2a hey-839                    # they read the history from the same file
+dispatch thread list
+
+dispatch dnd hey-838 on --reason "mid-migration"      # hold posts for it
+dispatch dnd hey-838 off                              # everything it missed is delivered now
+dispatch dnd                                          # who is currently on do-not-disturb
+\`\`\`
+
+**Inside an agent, \`--from\` is optional** — run from your own worktree, dispatch knows who you are. Same for \`dispatch dnd on\`, which is how an agent protects a stretch of careful work.
+
+**Three things stop a message loop.** A post is never delivered back to its author. An agent on do-not-disturb gets the buffer entry but no pane write, and is handed everything it missed when do-not-disturb comes off, so nothing said is lost. And a chain of replies stops being delivered after \`--max-hops\` (default 12) — the posts still land in the buffer; they just stop waking anyone up until a person posts, which starts a fresh chain.
+
+**What the sender is told:** \`thread post\` prints who it reached and, for everyone it did not, why and what would change it. If it reached nobody it says so outright, so a waiting agent stops waiting.
+
 **Key flags:** \`--name/-n\` sets branch name, \`--agent/-A\` picks the runtime (\`claude\` default, or \`codex\`), \`--effort\` sets codex reasoning depth, \`--model/-m\` picks model (default: \`opus[1m]\`), \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev, \`--ask\` to re-enable permission prompts.
 
 Config: \`~/.dispatch.yml\` (base_branch, agent, model, codex_model, reasoning_effort, max_turns, max_budget, permission_mode, worktree_dir, agent_timeout).
@@ -2784,68 +2835,168 @@ export function cmdSchedule(args: string[]): void {
   }
 }
 
+
 // ---------------------------------------------------------------------------
-// Threads — a shared buffer several agents can confer in
+// Threads, the agent directory, and do-not-disturb
 // ---------------------------------------------------------------------------
+
+/** Whether a message typed into this agent's pane would actually land there.
+ *
+ *  One answer for two callers: `deliverPost` uses it to decide, and the
+ *  directory prints it. They must not be able to disagree — a directory that
+ *  says "reachable" about an agent delivery then skips is worse than no
+ *  directory, because an agent reads it and waits for a reply.
+ *
+ *  The `why` is written for whoever is about to be told their post did not
+ *  arrive, so it says what to do next rather than naming a state. It is stored
+ *  verbatim in the thread's delivery record. */
+export function reachability(
+  id: string,
+  config: Config,
+): { ok: boolean; why: string; dnd: boolean } {
+  if (!sessionExists(id)) {
+    return { ok: false, why: `not running — nothing reaches it until 'dispatch resume ${id}'`, dnd: false };
+  }
+
+  const wtPath = worktreePath(id, config);
+
+  // Before liveness, so an agent that asked not to be interrupted is reported
+  // as that rather than as whatever its pane happens to look like.
+  const dnd = readDnd(wtPath);
+  if (dnd) {
+    return {
+      ok: false,
+      why:
+        `do not disturb${dnd.reason ? `: ${dnd.reason}` : ""} — held in the buffer, ` +
+        `delivered on 'dispatch dnd ${id} off'`,
+      dnd: true,
+    };
+  }
+
+  const state = readAgentState(wtPath);
+  if (state.mode === "headless") {
+    return { ok: false, why: "headless — it never reads its pane", dnd: false };
+  }
+
+  const adapter = getAdapter(state.agent || config.agent);
+
+  // The same three gates `dispatch send` applies, and for the same reason: a
+  // pane whose agent has exited is a live shell, and text pasted into it runs
+  // as commands. A thread post is text from another agent, which makes it the
+  // last thing that should reach a shell.
+  if (!agentProcessAlive(wtPath, adapter.bin, id)) {
+    return { ok: false, why: "no live agent process — its pane is sitting at a shell", dnd: false };
+  }
+  const screen = tmuxCapture(id, 40);
+  if (!adapter.isReady(screen)) {
+    return { ok: false, why: `no ${adapter.bin} prompt is visible in its pane`, dnd: false };
+  }
+  if (adapter.dismissStartupDialog(screen)) {
+    return { ok: false, why: "waiting on a dialog — answer it with 'dispatch attach'", dnd: false };
+  }
+  return { ok: true, why: "", dnd: false };
+}
+
+/** How a post gets to a pane. Injected so the delivery rules — who is skipped,
+ *  who is told what — can be tested against a recorded pane rather than a live
+ *  multiplexer, which is the part that has never been covered. */
+export interface DeliveryDeps {
+  reach(id: string): { ok: boolean; why: string };
+  write(id: string, text: string): void;
+}
+
+export function liveDelivery(config: Config): DeliveryDeps {
+  return {
+    reach: (id) => reachability(id, config),
+    write: (id, text) => sendToPane(id, text, worktreePath(id, config)),
+  };
+}
 
 /** Deliver one post to every recipient's pane.
  *
- *  Returns the members it could not reach, rather than throwing: a thread of
- *  four agents where one has exited must still deliver to the other three,
- *  and the caller has to be able to say which one was missed. Silently
- *  dropping a recipient is how a conversation loses a participant nobody
- *  notices is gone. */
+ *  Returns who it could not reach rather than throwing: a thread of four
+ *  agents where one has exited must still deliver to the other three, and the
+ *  caller has to be able to say which one was missed. Silently dropping a
+ *  recipient is how a conversation loses a participant nobody notices is gone.
+ *
+ *  Past the hop limit nobody is written to. That is the cycle brake, and it
+ *  has to act here rather than at the sender: the agent making the twentieth
+ *  reply has no idea it is in a loop, and neither did the one before it. The
+ *  post is still in the buffer — the conversation is readable, it just stops
+ *  waking anybody up. */
 export function deliverPost(
-  meta: { id: string; topic: string; members: string[]; created: string },
+  meta: ThreadMeta,
   post: ThreadPost,
-  config: Config,
-): { delivered: string[]; failed: { id: string; why: string }[] } {
-  const delivered: string[] = [];
-  const failed: { id: string; why: string }[] = [];
+  deps: DeliveryDeps,
+): { delivered: string[]; undelivered: { id: string; why: string }[] } {
+  const recipients = recipientsFor(meta, post.from, post.to);
 
-  for (const target of recipientsFor(meta, post.from, post.to)) {
-    if (!sessionExists(target)) {
-      failed.push({ id: target, why: "not running" });
-      continue;
-    }
-    const wt = worktreePath(target, config);
-    const state = readAgentState(wt);
-    if (state.mode === "headless") {
-      failed.push({ id: target, why: "headless — cannot receive messages" });
-      continue;
-    }
-    const adapter = getAdapter(state.agent || config.agent);
-    if (!agentProcessAlive(wt, adapter.bin, target)) {
-      failed.push({ id: target, why: "no live agent process" });
+  if (post.hops > meta.maxHops) {
+    const why =
+      `thread hop limit (${meta.maxHops}) reached — the reply chain is not being ` +
+      `delivered any further; a human posting to the thread starts a fresh one`;
+    return { delivered: [], undelivered: recipients.map((id) => ({ id, why })) };
+  }
+
+  const delivered: string[] = [];
+  const undelivered: { id: string; why: string }[] = [];
+  for (const target of recipients) {
+    const r = deps.reach(target);
+    if (!r.ok) {
+      undelivered.push({ id: target, why: r.why });
       continue;
     }
     try {
-      sendToPane(target, deliveryText(meta, post, target), wt);
+      deps.write(target, deliveryText(meta, post, target));
       delivered.push(target);
     } catch (e) {
-      failed.push({ id: target, why: String(e) });
+      undelivered.push({ id: target, why: String(e) });
     }
   }
-  return { delivered, failed };
+  return { delivered, undelivered };
+}
+
+/** The agent id to attribute a command to when none was typed: whoever owns
+ *  the worktree we are standing in. */
+function callerId(config: Config): string {
+  try {
+    return agentIdFromPath(process.cwd(), gitRoot(), config.worktreeDir);
+  } catch {
+    return "";
+  }
+}
+
+function reportDelivery(
+  delivered: string[],
+  undelivered: { id: string; why: string }[],
+): void {
+  if (delivered.length) log.dim(`  delivered: ${delivered.join(", ")}`);
+  for (const u of undelivered) log.warn(`  not delivered to ${u.id}: ${u.why}`);
+  if (!delivered.length && undelivered.length) {
+    // The sender is an agent that will otherwise stop and wait for a reply
+    // that cannot come. Say so in the words that stop it waiting.
+    log.warn("  Nobody was notified. Do not wait for a reply to this post.");
+  }
 }
 
 export function cmdThread(args: string[], config: Config): void {
   const sub = args[0];
   const rest = args.slice(1);
+  const dir = threadsDir();
+
+  /** Pull `--flag value` out of the arg list, so the remainder is positional. */
+  const take = (flag: string): string | undefined => {
+    const i = rest.indexOf(flag);
+    if (i === -1) return undefined;
+    const value = rest[i + 1];
+    rest.splice(i, 2);
+    return value;
+  };
 
   if (sub === "new") {
-    const topicIdx = rest.indexOf("--topic");
-    let topic = "";
-    if (topicIdx !== -1) {
-      topic = rest[topicIdx + 1] || "";
-      rest.splice(topicIdx, 2);
-    }
-    const idIdx = rest.indexOf("--id");
-    let idOverride: string | undefined;
-    if (idIdx !== -1) {
-      idOverride = rest[idIdx + 1];
-      rest.splice(idIdx, 2);
-    }
+    const topic = take("--topic") || "";
+    const idOverride = take("--id");
+    const maxHopsArg = take("--max-hops");
     const members = rest.filter((a) => !a.startsWith("--"));
     if (members.length < 1) {
       log.error('Usage: dispatch thread new <agent-id> [<agent-id>...] [--topic "..."]');
@@ -2855,63 +3006,77 @@ export function cmdThread(args: string[], config: Config): void {
       log.error(`Invalid thread id '${idOverride}': use a-z, 0-9 and dashes.`);
       process.exit(1);
     }
-    const meta = createThread(members, topic, idOverride);
+    const bad = members.find((m) => !isValidMemberId(m));
+    if (bad) {
+      log.error(`Invalid agent id '${bad}'.`);
+      process.exit(1);
+    }
+    const maxHops = maxHopsArg ? parseInt(maxHopsArg, 10) : DEFAULT_MAX_HOPS;
+    if (!Number.isFinite(maxHops) || maxHops < 1) {
+      log.error(`--max-hops must be a positive number, got '${maxHopsArg}'`);
+      process.exit(1);
+    }
+
+    const meta = createThread(dir, { members, topic, id: idOverride, maxHops });
     log.ok(`Thread ${fmt.BOLD}${meta.id}${fmt.NC} created`);
     log.dim(`  members: ${meta.members.join(", ")}`);
     if (meta.topic) log.dim(`  topic: ${meta.topic}`);
-    log.dim(`  post:   dispatch thread post ${meta.id} --from <you> "message"`);
+
+    // A thread whose members are not reachable delivers nothing, and the
+    // creator finds out only when a post goes nowhere. Say it now.
+    for (const m of meta.members) {
+      const r = reachability(m, config);
+      if (!r.ok) log.warn(`  ${m}: ${r.why}`);
+    }
+    log.dim(`  post:    dispatch thread post ${meta.id} --from <you> "message"`);
     return;
   }
 
   if (sub === "post") {
     const id = rest[0];
-    if (!id || !threadExists(id)) {
+    if (!id || !threadExists(dir, id)) {
       log.error(`No such thread: ${id || "(none given)"}`);
       log.dim("  List them with: dispatch thread list");
       process.exit(1);
     }
-    let from = "human";
-    const fromIdx = rest.indexOf("--from");
-    if (fromIdx !== -1) {
-      from = rest[fromIdx + 1] || "human";
-      rest.splice(fromIdx, 2);
-    }
+    // An agent posting from its own worktree does not have to know its id, and
+    // cannot get it wrong: a post attributed to the wrong sender is delivered
+    // back to whoever it was misattributed to.
+    const from = take("--from") || callerId(config) || "human";
+    const messageFile = take("--message-file");
     let text: string;
-    const fileIdx = rest.indexOf("--message-file");
-    if (fileIdx !== -1) {
-      const path = rest[fileIdx + 1];
-      if (!path || !existsSync(path)) {
-        log.error(`Message file not found: ${path}`);
+    if (messageFile) {
+      if (!existsSync(messageFile)) {
+        log.error(`Message file not found: ${messageFile}`);
         process.exit(1);
       }
-      text = readFileSync(path, "utf-8").trim();
-      rest.splice(fileIdx, 2);
+      text = readFileSync(messageFile, "utf-8").trim();
     } else {
       text = rest.slice(1).join(" ");
     }
     if (!text) {
       log.error('Usage: dispatch thread post <thread-id> --from <id> "message"');
+      log.dim("       dispatch thread post <thread-id> --message-file <path>");
       process.exit(1);
     }
 
-    const t = readThread(id)!;
+    const t = readThread(dir, id)!;
+    if (!t.meta.members.includes(from) && from !== "human") {
+      log.warn(`'${from}' is not a member of ${id}; posting anyway (add with: dispatch thread add ${id} ${from})`);
+    }
     // An @mention addresses part of the thread; without one everyone gets it.
     const mentioned = parseMentions(text).filter((m) => t.meta.members.includes(m));
-    const post: ThreadPost = {
-      ts: new Date().toISOString(),
-      from,
-      text,
-      ...(mentioned.length ? { to: mentioned } : {}),
-    };
-    // Written before delivery: the transcript is the record, and a delivery
-    // that fails must not also lose what was said.
-    appendPost(id, post);
+    const post = appendPost(dir, t, { from, text, to: mentioned });
 
-    const { delivered, failed } = deliverPost(t.meta, post, config);
+    const { delivered, undelivered } = deliverPost(t.meta, post, liveDelivery(config));
+    // Recorded whatever happened, including "nobody": that is what tells a
+    // returning agent this post is still owed to it.
+    recordDelivery(dir, id, { post: post.id, delivered, undelivered });
+
     log.ok(`Posted to ${fmt.BOLD}${id}${fmt.NC} as ${from}`);
-    if (delivered.length) log.dim(`  delivered: ${delivered.join(", ")}`);
-    for (const f of failed) log.warn(`  not delivered to ${f.id}: ${f.why}`);
-    if (!delivered.length && !failed.length) {
+    if (mentioned.length) log.dim(`  addressed: ${mentioned.join(", ")}`);
+    reportDelivery(delivered, undelivered);
+    if (!delivered.length && !undelivered.length) {
       log.dim("  nobody else is in this thread yet");
     }
     return;
@@ -2919,7 +3084,7 @@ export function cmdThread(args: string[], config: Config): void {
 
   if (sub === "read") {
     const id = rest[0];
-    const t = id ? readThread(id) : null;
+    const t = id ? readThread(dir, id) : null;
     if (!t) {
       log.error(`No such thread: ${id || "(none given)"}`);
       process.exit(1);
@@ -2936,7 +3101,7 @@ export function cmdThread(args: string[], config: Config): void {
 
   if (sub === "add") {
     const id = rest[0];
-    if (!id || !threadExists(id)) {
+    if (!id || !threadExists(dir, id)) {
       log.error(`No such thread: ${id || "(none given)"}`);
       process.exit(1);
     }
@@ -2945,22 +3110,32 @@ export function cmdThread(args: string[], config: Config): void {
       log.error("Usage: dispatch thread add <thread-id> <agent-id>...");
       process.exit(1);
     }
-    const next = addMembers(id, members);
+    const bad = members.find((m) => !isValidMemberId(m));
+    if (bad) {
+      log.error(`Invalid agent id '${bad}'.`);
+      process.exit(1);
+    }
+    const next = addMembers(dir, id, members);
     log.ok(`Added ${members.join(", ")} to ${id}`);
     log.dim(`  members: ${next.join(", ")}`);
+    log.dim(`  they read the history so far with: dispatch thread read ${id}`);
     return;
   }
 
   if (sub === "list" || !sub) {
-    const all = listThreads();
+    const all = listThreads(dir);
     if (!all.length) {
       log.dim("No threads. Create one: dispatch thread new <agent-id> <agent-id>");
       return;
     }
-    for (const m of all) {
+    for (const t of all) {
+      const last = t.posts[t.posts.length - 1];
       console.log(
-        `${fmt.BOLD}${m.id}${fmt.NC}  ${m.members.join(", ")}${m.topic ? `  ${fmt.DIM}${m.topic}${fmt.NC}` : ""}`,
+        `${fmt.BOLD}${t.meta.id}${fmt.NC}  ${t.meta.members.join(", ")}` +
+          `  ${fmt.DIM}${t.posts.length} post${t.posts.length === 1 ? "" : "s"}` +
+          `${t.meta.topic ? `  ${t.meta.topic}` : ""}${fmt.NC}`,
       );
+      if (last) log.dim(`  ⤷ ${last.from}: ${last.text.split("\n")[0].slice(0, 80)}`);
     }
     return;
   }
@@ -2968,4 +3143,190 @@ export function cmdThread(args: string[], config: Config): void {
   log.error(`Unknown thread command: ${sub}`);
   log.dim("  new | post | read | add | list");
   process.exit(1);
+}
+
+/** Deliver everything a member missed while it was not listening, as one
+ *  message, and record it as delivered so it stops being owed. */
+function deliverCatchUp(
+  agentId: string,
+  deps: DeliveryDeps,
+): { threads: string[]; posts: number; blocked: string } {
+  const dir = threadsDir();
+  const threads: string[] = [];
+  let posts = 0;
+
+  // The same gate delivery uses, and for the same reason: an agent that is not
+  // there has a pane sitting at a shell, and a catch-up typed into it runs as
+  // commands. Everything stays pending, which is the point of the queue.
+  const reach = deps.reach(agentId);
+  if (!reach.ok) return { threads, posts, blocked: reach.why };
+
+  for (const t of listThreads(dir)) {
+    if (!t.meta.members.includes(agentId)) continue;
+    const pending = pendingFor(t, agentId);
+    if (!pending.length) continue;
+    try {
+      deps.write(agentId, catchUpText(t.meta, pending, agentId));
+    } catch {
+      // Left pending on purpose: an undelivered catch-up must stay owed, or
+      // the posts vanish from the queue without anyone having seen them.
+      continue;
+    }
+    for (const p of pending) {
+      recordDelivery(dir, t.meta.id, { post: p.id, delivered: [agentId], undelivered: [] });
+    }
+    threads.push(t.meta.id);
+    posts += pending.length;
+  }
+  return { threads, posts, blocked: "" };
+}
+
+export function cmdDnd(args: string[], config: Config): void {
+  const state = args.find((a) => a === "on" || a === "off");
+  const reasonIdx = args.indexOf("--reason");
+  const reason = reasonIdx === -1 ? "" : args.slice(reasonIdx + 1).join(" ");
+  const positional = args.filter(
+    (a, i) => a !== state && !a.startsWith("--") && (reasonIdx === -1 || i < reasonIdx),
+  );
+  const id = positional[0] || callerId(config);
+
+  if (!state) {
+    // No verb: report, which is what an orchestrator wants before it posts.
+    const quiet = liveAgentIds().filter((a) => readDnd(worktreePath(a, config)));
+    if (!quiet.length) {
+      log.info("No agent is on do-not-disturb");
+      return;
+    }
+    for (const a of quiet) {
+      const d = readDnd(worktreePath(a, config))!;
+      console.log(`${fmt.BOLD}${a}${fmt.NC}  ${d.reason || "(no reason given)"}  ${fmt.DIM}since ${d.since}${fmt.NC}`);
+    }
+    return;
+  }
+
+  if (!id) {
+    log.error("Usage: dispatch dnd <agent-id> on|off [--reason \"...\"]");
+    log.dim("  From inside an agent's worktree the id is inferred: dispatch dnd on");
+    process.exit(1);
+  }
+
+  const wtPath = worktreePath(id, config);
+  if (!existsSync(wtPath)) {
+    log.error(`No worktree for agent '${id}' at ${wtPath}`);
+    process.exit(1);
+  }
+
+  if (state === "on") {
+    setDnd(wtPath, reason);
+    // The marker is dispatch bookkeeping, not the user's code, and an agent
+    // that sets it mid-run would otherwise commit it with `git add -A`.
+    excludeDispatchArtifacts(wtPath);
+    log.ok(`${fmt.BOLD}${id}${fmt.NC} is on do-not-disturb`);
+    if (reason) log.dim(`  reason: ${reason}`);
+    log.dim("  thread posts still land in the buffer; they are delivered when it goes off");
+    return;
+  }
+
+  const was = clearDnd(wtPath);
+  log.ok(`${fmt.BOLD}${id}${fmt.NC} is off do-not-disturb${was ? "" : " (it was not on)"}`);
+  const { threads, posts, blocked } = deliverCatchUp(id, liveDelivery(config));
+  if (posts) {
+    log.dim(`  delivered ${posts} held message${posts === 1 ? "" : "s"} from ${threads.join(", ")}`);
+  } else if (blocked) {
+    log.warn(`  held messages were not delivered: ${blocked}`);
+    log.dim(`  they stay queued — read them with: dispatch thread list`);
+  }
+}
+
+/** Ids of agents with a live session, in the order the multiplexer lists them. */
+function liveAgentIds(): string[] {
+  if (!tmuxHasSession()) return [];
+  return tmuxListWindows()
+    .split("\n")
+    .map((line) => line.split("|")[0])
+    .filter((name) => name && name !== "dispatch");
+}
+
+export function cmdDirectory(args: string[], config: Config): void {
+  const json = args.includes("--json");
+  // ensureMultiplexer announces the backend on stdout, which would sit in
+  // front of the JSON an agent is about to parse. Reading the directory needs
+  // no multiplexer to be started, only queried.
+  if (!json) ensureMultiplexer();
+  const entries = collectDirectory(config);
+  if (json) {
+    console.log(directoryJson(entries));
+    return;
+  }
+  console.log();
+  console.log(`${fmt.BOLD}Agent Directory${fmt.NC}`);
+  console.log(`${fmt.DIM}──────────────────────────────────────────────${fmt.NC}`);
+  console.log(formatDirectory(entries, fmt));
+  console.log();
+}
+
+/** Everything the directory reports, gathered from state dispatch already
+ *  keeps: the multiplexer's window list, the worktree, the history file and
+ *  the thread buffers. Nothing here is a field anyone has to maintain. */
+function collectDirectory(config: Config): DirectoryEntry[] {
+  if (!tmuxHasSession()) return [];
+  const threads = listThreads(threadsDir());
+  const summaries = getAgentSummaries();
+  const entries: DirectoryEntry[] = [];
+
+  for (const line of tmuxListWindows().split("\n")) {
+    if (!line) continue;
+    const [name, pid, path, dead] = line.split("|");
+    if (!name || name === "dispatch") continue;
+
+    const wtPath = path || worktreePath(name, config);
+    const status: DirectoryEntry["status"] =
+      dead === "1"
+        ? "exited"
+        : pid && execQuiet(`pgrep -P ${pid}`) !== null
+          ? "running"
+          : "idle";
+
+    const hist = summaries.find((s) => s.id === name);
+    const state = readAgentState(wtPath);
+    const trace = readAgentTrace(wtPath, state.agent || config.agent, {
+      mode: state.mode,
+      since: hist?.launchedAt ? Date.parse(hist.launchedAt) : undefined,
+    });
+    const work = describeWork({
+      prompt: readIfPresent(join(wtPath, ".dispatch-prompt.txt")),
+      history: hist?.prompt,
+      lastText: trace?.parsed.lastText,
+    });
+
+    const mine = threads.filter((t) => t.meta.members.includes(name));
+    const dnd = readDnd(wtPath);
+    const reach = reachability(name, config);
+
+    entries.push({
+      id: name,
+      // The branch as git has it, not as the id implies: an agent that
+      // switched branches mid-run would otherwise be reported on the wrong one.
+      branch:
+        execQuiet(`git -C "${wtPath}" rev-parse --abbrev-ref HEAD`) || hist?.branch || name,
+      status,
+      reachable: reach.ok,
+      ...(reach.ok ? {} : { unreachable: reach.why }),
+      dnd: dnd !== null,
+      ...(dnd ? { dndReason: dnd.reason } : {}),
+      working: work.text,
+      workingFrom: work.source,
+      threads: mine.map((t) => t.meta.id),
+      waiting: mine.reduce((n, t) => n + pendingFor(t, name).length, 0),
+    });
+  }
+  return entries;
+}
+
+function readIfPresent(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch {
+    return undefined;
+  }
 }
