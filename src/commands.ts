@@ -2129,13 +2129,13 @@ dispatch cleanup --all --delete-branch                # Clean up everything
 dispatch prune --merged --delete-branch               # Remove worktrees with merged PRs
 \`\`\`
 
-**An agent tells you when it is done — it does not leave you guessing.** Every dispatched brief ends with an instruction to run `dispatch done` once the agent is past its own review, so you do not have to infer completion from a quiet pane. `dispatch directory` then shows `done` alongside what it did, what it left for a person, and the PR.
+**An agent tells you when it is done — it does not leave you guessing.** Every dispatched brief ends with an instruction to run \`dispatch done\` once the agent is past its own review, so you do not have to infer completion from a quiet pane. \`dispatch directory\` then shows \`done\` alongside what it did, what it left for a person, and the PR.
 
-```bash
+\`\`\`bash
 dispatch done "rewrote the IVR detector" --handoff "someone has to pick a threshold"
-```
+\`\`\`
 
-Inference cannot do this job: a finished agent, an agent mid-way through a 4,000-test suite, and an agent stuck all look the same from outside. `dispatch resume` clears the declaration, because a resumed agent is working again.
+Inference cannot do this job: a finished agent, an agent mid-way through a 4,000-test suite, and an agent stuck all look the same from outside. \`dispatch resume\` clears the declaration, because a resumed agent is working again.
 
 **Agents can talk to each other.** \`dispatch directory\` lists every running agent, what it is working on (read from its brief, its history event, or its last message — nothing to keep up to date by hand) and whether it can be reached; \`--json\` for a machine-readable form. A thread is a shared buffer several agents confer in: each post is appended to \`.dispatch-threads/<id>.jsonl\` and typed into the other members' panes carrying the thread id, so they can reply into the same buffer.
 

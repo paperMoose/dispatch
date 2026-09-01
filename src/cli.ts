@@ -98,9 +98,9 @@ Lifecycle:
   6. cleanup — Remove worktree when done (--delete-branch to also delete the branch)
 
 Finishing:
-  An agent runs `dispatch done "what I did" --handoff "what is left"` when it is
+  An agent runs 'dispatch done "what I did" --handoff "what is left"' when it is
   past its own review. Every dispatched brief ends with that instruction, so it
-  does not depend on your CLAUDE.md being current. `dispatch directory` then
+  does not depend on your CLAUDE.md being current. 'dispatch directory' then
   shows it as done rather than leaving you to guess from a quiet pane — a
   finished agent and one mid-way through a long test run look identical from
   outside. Resuming an agent clears the declaration.
