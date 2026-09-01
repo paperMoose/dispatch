@@ -42,6 +42,17 @@ function post(dir: string, id: string, from: string, text: string, to?: string[]
   return appendPost(dir, t, { from, text, ...(to ? { to } : {}) });
 }
 
+/** What `deliverPost` records when a recipient could not be written to. A
+ *  post only becomes owed once a miss is on record, so tests that want a
+ *  pending post have to go through this, exactly as production does. */
+function held(dir: string, threadId: string, postId: string, who: string): void {
+  recordDelivery(dir, threadId, {
+    post: postId,
+    delivered: [],
+    undelivered: [{ id: who, why: "do not disturb: mid-migration" }],
+  });
+}
+
 function lines(dir: string, id: string): string[] {
   return readFileSync(join(dir, `${id}.jsonl`), "utf-8").split("\n").filter((l) => l.trim());
 }
@@ -229,6 +240,7 @@ describe("what a member has not seen", () => {
     const dir = store();
     createThread(dir, { members: ["alpha", "bravo"], id: "t-p1" });
     const p = post(dir, "t-p1", "alpha", "did you see this");
+    held(dir, "t-p1", p.id, "bravo");
 
     assert.deepEqual(
       pendingFor(readThread(dir, "t-p1")!, "bravo").map((x) => x.text),
@@ -239,10 +251,45 @@ describe("what a member has not seen", () => {
     assert.deepEqual(pendingFor(readThread(dir, "t-p1")!, "bravo"), []);
   });
 
+  it("does not owe a post whose delivery is still in flight", () => {
+    // The duplicate-delivery bug, reproduced. A post is written before its
+    // delivery is attempted, and sendToPane waits three seconds per recipient
+    // before submitting. In that window the post exists with no delivery
+    // record. A `dnd off` landing there used to deliver a second copy while
+    // the first write was still going — observed 2026-08-31 in thread
+    // s2-group, where carol got the same post typed into its pane twice.
+    const dir = store();
+    createThread(dir, { members: ["alpha", "bravo"], id: "t-flight" });
+    post(dir, "t-flight", "alpha", "delivery has not been recorded yet");
+
+    assert.deepEqual(
+      pendingFor(readThread(dir, "t-flight")!, "bravo"),
+      [],
+      "a post nobody has reported missing is not owed to anybody",
+    );
+  });
+
+  it("owes a post only once a delivery is recorded as missed", () => {
+    const dir = store();
+    createThread(dir, { members: ["alpha", "bravo"], id: "t-missed" });
+    const p = post(dir, "t-missed", "alpha", "held while bravo was quiet");
+    recordDelivery(dir, "t-missed", {
+      post: p.id,
+      delivered: [],
+      undelivered: [{ id: "bravo", why: "do not disturb: mid-migration" }],
+    });
+
+    assert.deepEqual(
+      pendingFor(readThread(dir, "t-missed")!, "bravo").map((x) => x.text),
+      ["held while bravo was quiet"],
+    );
+  });
+
   it("does not include posts addressed to somebody else", () => {
     const dir = store();
     createThread(dir, { members: ["alpha", "bravo", "charlie"], id: "t-p2" });
-    post(dir, "t-p2", "alpha", "@charlie only you", ["charlie"]);
+    const only = post(dir, "t-p2", "alpha", "@charlie only you", ["charlie"]);
+    held(dir, "t-p2", only.id, "charlie");
 
     assert.deepEqual(pendingFor(readThread(dir, "t-p2")!, "bravo"), []);
     assert.equal(pendingFor(readThread(dir, "t-p2")!, "charlie").length, 1);
@@ -254,12 +301,14 @@ describe("what a member has not seen", () => {
     // A new member reads the history the way anyone does: thread read.
     const dir = store();
     createThread(dir, { members: ["alpha"], id: "t-p5" });
-    post(dir, "t-p5", "alpha", "said before charlie was here");
+    const before = post(dir, "t-p5", "alpha", "said before charlie was here");
     addMembers(dir, "t-p5", ["charlie"]);
+    held(dir, "t-p5", before.id, "charlie");
 
     assert.deepEqual(pendingFor(readThread(dir, "t-p5")!, "charlie"), []);
 
-    post(dir, "t-p5", "alpha", "said after charlie joined");
+    const after = post(dir, "t-p5", "alpha", "said after charlie joined");
+    held(dir, "t-p5", after.id, "charlie");
     assert.deepEqual(
       pendingFor(readThread(dir, "t-p5")!, "charlie").map((p) => p.text),
       ["said after charlie joined"],
@@ -276,8 +325,10 @@ describe("what a member has not seen", () => {
   it("carries the missed text itself into the catch-up, not a pointer to it", () => {
     const dir = store();
     const meta = createThread(dir, { members: ["alpha", "bravo"], id: "t-p4" });
-    post(dir, "t-p4", "alpha", "the migration is running");
-    post(dir, "t-p4", "alpha", "it finished, you can start");
+    const one = post(dir, "t-p4", "alpha", "the migration is running");
+    const two = post(dir, "t-p4", "alpha", "it finished, you can start");
+    held(dir, "t-p4", one.id, "bravo");
+    held(dir, "t-p4", two.id, "bravo");
 
     const text = catchUpText(meta, pendingFor(readThread(dir, "t-p4")!, "bravo"), "bravo");
     assert.ok(text.includes("the migration is running"));

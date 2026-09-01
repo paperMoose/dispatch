@@ -285,18 +285,44 @@ export function nextHops(t: Thread, from: string): number {
   return 0;
 }
 
-/** Posts a member should have seen and has not: they were a recipient, and no
- *  delivery record puts them among the delivered. This is the queue behind
+/** Posts a member should have seen and has not. This is the queue behind
  *  do-not-disturb — the buffer holds everything, and this is how the agent
- *  finds out what arrived while it was not listening. */
+ *  finds out what arrived while it was not listening.
+ *
+ *  Owed means a delivery was *attempted and missed*: some record names this
+ *  member among the undelivered, and none names them among the delivered. A
+ *  post with no delivery record at all is not owed to anybody yet, and that
+ *  distinction is the whole point.
+ *
+ *  Its absence was a duplicate-delivery bug, seen on the first three-agent
+ *  run (2026-08-31, thread s2-group). A post is appended before its delivery
+ *  is attempted — deliberately, so a failed delivery cannot lose what was
+ *  said — and `sendToPane` then waits three seconds per recipient before
+ *  submitting. Under the old rule that window left the post looking owed to
+ *  every recipient, so a `dnd off` landing inside it delivered a copy while
+ *  the original write was still in flight:
+ *
+ *    00:50:28.588  POST      631b4fa3 from t2-alpha
+ *    00:50:34.131  DELIVERY  631b4fa3 -> ['t2-carol']            <- catch-up
+ *    00:50:35.399  DELIVERY  631b4fa3 -> ['t2-bravo','t2-carol'] <- the original
+ *
+ *  carol got it typed into its pane twice. Requiring evidence of a miss, not
+ *  merely the absence of evidence of a hit, closes the window without a lock.
+ *  The cost is that a post whose sender died mid-delivery is never caught up —
+ *  correct, since nobody knows whether that pane write landed, and the post is
+ *  still there in `thread read`. */
 export function pendingFor(t: Thread, agent: string): ThreadPost[] {
-  const got = new Set(
-    t.deliveries.flatMap((d) => (d.delivered.includes(agent) ? [d.post] : [])),
-  );
+  const got = new Set<string>();
+  const missed = new Set<string>();
+  for (const d of t.deliveries) {
+    if (d.delivered.includes(agent)) got.add(d.post);
+    if (d.undelivered.some((u) => u.id === agent)) missed.add(d.post);
+  }
   const from = t.meta.joinedAfter?.[agent] ?? 0;
   return t.posts.filter(
     (p, i) =>
       i >= from &&
+      missed.has(p.id) &&
       !got.has(p.id) &&
       recipientsFor(t.meta, p.from, p.to).includes(agent),
   );
