@@ -406,6 +406,20 @@ const claudeAdapter: AgentAdapter = {
   // matching it reported "ready" for a pane sitting at a dead shell, and the
   // prompt was then pasted there and executed line by line.
   isReady(content) {
+    // The composer box, which is on screen for as long as the TUI is.
+    //
+    // Everything below it matches the *startup banner*, and a banner scrolls
+    // away. An agent that had worked for a couple of hours therefore stopped
+    // reading as ready and could never be reached again — the failure got
+    // worse the more an agent had done, which is the opposite of what anyone
+    // would guess. Seen 2026-08-31 on an agent sitting idle at an empty prompt
+    // having just printed "Both jobs are done and pushed".
+    //
+    // Requiring a rule *both* above and below the prompt is what keeps this
+    // off a shell: powerlevel10k draws a rule above its prompt too, and the
+    // bare `❯` was the original false positive that let prompts be pasted into
+    // dead shells.
+    if (/─{10,}[^\n]*\n\s*❯[^\n]*\n\s*─{10,}/.test(content)) return true;
     return /Claude Code v\d|\? for shortcuts|▐▛|Welcome to Claude/.test(content);
   },
 

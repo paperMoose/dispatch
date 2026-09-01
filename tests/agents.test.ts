@@ -779,6 +779,51 @@ describe("parser accuracy against real transcript shapes", () => {
   });
 });
 
+describe("readiness survives the banner scrolling away", () => {
+  // The bug this pins: every readiness marker matched the startup banner, so
+  // an agent stopped being recognisable once it had done enough work to scroll
+  // the banner out of the captured window. The failure got worse the longer an
+  // agent had been useful. Captured 2026-08-31 from an agent idle at an empty
+  // prompt having just reported both its jobs done and pushed.
+  const claude = getAdapter("claude");
+  const RULE = "─".repeat(60);
+
+  const WORKED_FOR_HOURS = [
+    "  that column. min_endpointing_delay is a 0.5s floor after Flux's EOT.",
+    "✻ Crunched for 22m 45s · done 9:31 PM · 4 shells still running",
+    "※ recap: Both jobs are done and pushed to voice-transcript-models.",
+    RULE,
+    "❯ ",
+    RULE,
+    "  ⏵⏵ don't ask on · 4 shells · ← 2 agents · ↓ to manage            /rc",
+  ].join("\n");
+
+  it("recognises a long-running agent idle at its prompt", () => {
+    assert.equal(claude.isReady(WORKED_FOR_HOURS), true);
+  });
+
+  it("carries no startup banner at all, which is the point", () => {
+    for (const stale of [/Claude Code v\d/, /\? for shortcuts/, /▐▛/, /Welcome to Claude/]) {
+      assert.equal(stale.test(WORKED_FOR_HOURS), false, `${stale} should not be what saves this`);
+    }
+  });
+
+  it("still recognises a freshly started agent", () => {
+    assert.equal(claude.isReady("Claude Code v9.9.9\n? for shortcuts"), true);
+  });
+
+  it("does not read a bare shell as ready", () => {
+    // The original false positive: a dead shell got the prompt pasted into it
+    // and ran it line by line.
+    assert.equal(claude.isReady("➜  repo git:(main) ✗\n❯ "), false);
+  });
+
+  it("does not read powerlevel10k's ruled prompt as ready", () => {
+    // p10k draws a rule above its prompt, so a rule alone cannot be the test.
+    assert.equal(claude.isReady(`${RULE}\n❯ `), false);
+  });
+});
+
 describe("the trust-this-folder dialog", () => {
   // Every claude agent launched into a fresh worktree meets this, and the
   // default option is the destructive one. On 2026-08-31 a whole evening of
