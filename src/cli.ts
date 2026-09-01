@@ -25,6 +25,9 @@ import {
   cmdScheduleShouldFire,
   cmdScheduleRecordSuccess,
   cmdScheduledTarget,
+  cmdThread,
+  cmdDirectory,
+  cmdDnd,
 } from "./commands.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -47,6 +50,15 @@ Commands:
   dispatch status <id>                     Structured summary: turns, files, commits, last actions
   dispatch logs <id>                       Tail a headless agent's output
   dispatch send <id> "<msg>"               Post a message to a running interactive agent
+  dispatch directory [--json]              Who is running, what they are on, who can be reached
+  dispatch thread new <id> <id> [--topic X] Start a shared buffer two or more agents confer in
+  dispatch thread post <tid> --from <id> "<msg>"  Post to a thread; delivers to the other members
+  dispatch thread read <tid>               Print the whole conversation
+  dispatch thread add <tid> <id>...        Add agents to an existing thread
+  dispatch thread list                     Show all threads
+  dispatch thread pending                  Groups an agent started, waiting on you
+  dispatch thread approve <tid>            Sanction a group; its members then talk freely
+  dispatch dnd <id> on|off [--reason X]    Hold thread posts for an agent that must not be interrupted
   dispatch stop <id>                       Send Ctrl-C and kill the tmux window
   dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
@@ -83,6 +95,33 @@ Lifecycle:
   5. resume — Pick up where it left off (claude --continue / codex resume)
   6. cleanup — Remove worktree when done (--delete-branch to also delete the branch)
 
+Agent Conversations:
+  dispatch directory                    See who is running and what they are working on
+  dispatch thread new a b --topic "the auth refactor"
+  dispatch thread post t-4f2a --from a --replay "rg -n newHelper src/session.ts" "..."
+  dispatch thread read t-4f2a           The whole conversation, for anyone joining late
+
+  Every post lands in a shared buffer under .dispatch-threads/ and is typed into
+  the other members' panes with the thread id, so they can answer. @mentions
+  address a subset. An agent on do-not-disturb still gets the buffer entry and
+  is handed everything it missed when do-not-disturb comes off. A reply chain
+  stops being delivered after --max-hops replies (default 12), so two agents
+  cannot keep each other awake forever.
+
+  Forming a group needs your say-so; talking inside one does not. A thread you
+  create is sanctioned because you created it. One an agent creates waits until
+  'dispatch thread approve' — then its members coordinate freely, which is what
+  makes this usable for a swarm. Your own posts always go straight through.
+  Setting thread_delivery to auto lets agents form their own groups unsupervised.
+
+  Threads are for being stuck, not for being polite. An agent should post when
+  it has hit a blank or has been wrong about the same thing twice — not to give
+  status, and never to acknowledge. A post should carry the experiment that
+  settles it: --replay takes a command the reader can run to see what the sender
+  saw, shown to them and stored in the thread, never run by dispatch. Without
+  one, a claim has to be taken on trust. Delivery says all of this out loud on
+  every message, so an agent does not have to have read this.
+
 Input Types:
   Linear ticket    dispatch run HEY-837              Fetches title + description from Linear
   Free text        dispatch run "Fix the auth bug"   Uses your prompt directly
@@ -116,6 +155,8 @@ Environment:
   DISPATCH_CODEX_MODEL   Default model when --agent codex (default: codex's own)
   DISPATCH_REASONING_EFFORT  Codex reasoning effort (default: codex's own)
   DISPATCH_PERMISSION_MODE  Permission mode for agents (default: dontAsk; "" for prompts)
+  DISPATCH_THREAD_DELIVERY  ask (default) or auto — whether an agent may form
+                            a group chat without you approving it
   DISPATCH_CONFIG        Config file path (default: ~/.dispatch.yml)
 
 Config (~/.dispatch.yml):
@@ -125,6 +166,7 @@ Config (~/.dispatch.yml):
   codex_model: gpt-5.6-sol  # Model when agent is codex
   reasoning_effort: xhigh   # Codex reasoning depth
   permission_mode: dontAsk  # Agents don't stop for permission prompts
+  thread_delivery: ask    # Agent-created group chats wait for your approval
   max_turns: 20           # Default max turns for headless
   agent_timeout: 30       # Seconds to wait for the agent TUI to start
   worktree_dir: .worktrees  # Where worktrees are created`);
@@ -189,6 +231,17 @@ async function main(): Promise<void> {
       break;
     case "send":
       cmdSend(rest, config);
+      break;
+    case "thread":
+    case "threads":
+      cmdThread(rest, config);
+      break;
+    case "directory":
+    case "dir":
+      cmdDirectory(rest, config);
+      break;
+    case "dnd":
+      cmdDnd(rest, config);
       break;
     case "history":
       cmdHistory(rest);

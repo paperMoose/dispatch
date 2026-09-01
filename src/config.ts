@@ -19,6 +19,16 @@ export interface Config {
   maxBudget: string;
   allowedTools: string;
   permissionMode: string;
+  /** Whether one agent's thread post may be typed into another agent's pane
+   *  without a person releasing it: "ask" (default) or "auto".
+   *
+   *  A pane write interrupts whatever that agent was mid-way through, so an
+   *  agent authorising its own interrupts is the wrong default. Under "ask"
+   *  the post still lands in the buffer — nothing said is lost — and waits for
+   *  `dispatch thread approve`. "auto" is for deliberately measuring whether
+   *  unsupervised agent chatter helps or hurts; a single thread can opt in
+   *  with `thread new --auto` without loosening the default. */
+  threadDelivery: string;
   worktreeDir: string;
   claudeTimeout: number;
 }
@@ -36,6 +46,7 @@ const DEFAULTS: Config = {
   // Dispatched agents work unattended in a throwaway worktree; a permission
   // prompt there stalls the run until someone notices. `--ask` restores prompts.
   permissionMode: "dontAsk",
+  threadDelivery: "ask",
   worktreeDir: ".worktrees",
   claudeTimeout: 30,
 };
@@ -50,6 +61,7 @@ const KEY_MAP: Record<string, keyof Config> = {
   max_budget: "maxBudget",
   allowed_tools: "allowedTools",
   permission_mode: "permissionMode",
+  thread_delivery: "threadDelivery",
   worktree_dir: "worktreeDir",
   claude_timeout: "claudeTimeout",
   // Runtime-neutral alias for claude_timeout, which predates codex support.
@@ -108,6 +120,7 @@ export function loadConfig(cliOverrides?: Partial<Config>): Config {
     ["DISPATCH_MAX_BUDGET", "maxBudget"],
     ["DISPATCH_ALLOWED_TOOLS", "allowedTools"],
     ["DISPATCH_PERMISSION_MODE", "permissionMode"],
+    ["DISPATCH_THREAD_DELIVERY", "threadDelivery"],
     ["DISPATCH_CLAUDE_TIMEOUT", "claudeTimeout"],
   ];
   for (const [envVar, key] of envMap) {

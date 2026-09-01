@@ -139,7 +139,13 @@ export function ensureWorktreeDir(config: Config): string {
 
   // Add to .gitignore if not already there
   const gitignore = join(root, ".gitignore");
-  const entries = [`${config.worktreeDir}/`, ".dispatch-history.jsonl"];
+  // .dispatch-threads/ holds the shared message buffers, which live in the main
+  // repo root rather than in a worktree: they outlive any one agent.
+  const entries = [
+    `${config.worktreeDir}/`,
+    ".dispatch-history.jsonl",
+    ".dispatch-threads/",
+  ];
   if (existsSync(gitignore)) {
     const content = readFileSync(gitignore, "utf-8");
     const lines = content.split("\n");
@@ -168,6 +174,7 @@ const DISPATCH_ARTIFACTS = [
   ".dispatch-prompt.txt",
   ".dispatch-cmux-workspace",
   ".dispatch.log",
+  ".dispatch-dnd",
 ];
 
 /** Hide dispatch's own files from git.
