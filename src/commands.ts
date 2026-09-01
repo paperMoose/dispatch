@@ -3018,9 +3018,42 @@ function reportDelivery(
   }
 }
 
+const THREAD_HELP = `dispatch thread — a shared buffer several agents confer in
+
+Subcommands:
+  new <id> <id>... [--topic "..."] [--max-hops N]
+                          Start a group. One you create is approved because you
+                          created it; one an agent creates waits for approval.
+  post <tid> [--from <id>] [--replay "<cmd>"] "<message>"
+                          Say something. Typed into the other members' panes.
+                          --replay carries the command that shows what you saw;
+                          dispatch stores and shows it, and never runs it.
+  read <tid>              Print the whole conversation
+  add <tid> <id>...       Add agents to an existing group
+  list                    All groups, newest first
+  pending                 Groups an agent started, waiting on you
+  approve <tid>           Sanction a group; its members then talk freely
+
+Inside an agent's own worktree --from is optional: dispatch knows who you are.
+
+Loops are stopped three ways: a post never goes back to its author,
+do-not-disturb holds delivery without losing the post (dispatch dnd), and a
+reply chain stops being delivered after --max-hops (default 12) until a person
+posts, which starts a fresh chain.`;
+
 export function cmdThread(args: string[], config: Config): void {
   const sub = args[0];
   const rest = args.slice(1);
+
+  // `thread --help` is what someone types before they know the subcommands, so
+  // it must not be answered with "Unknown thread command: --help".
+  if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
+    if (sub) {
+      console.log(THREAD_HELP);
+      return;
+    }
+  }
+
   const dir = threadsDir();
 
   /** Pull `--flag value` out of the arg list, so the remainder is positional. */

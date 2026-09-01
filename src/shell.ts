@@ -809,15 +809,22 @@ export function agentProcessAlive(
   // cmux, or no pane: cwd match. Weaker, since it cannot tell which pane.
   const pids = execQuiet(`pgrep -x ${bin}`);
   if (!pids) return false;
-  for (const pid of pids.trim().split("\n")) {
-    if (!/^\d+$/.test(pid)) continue;
-    const info = execQuiet(`lsof -a -p ${pid} -d cwd -Fn`);
-    if (!info) continue;
-    for (const line of info.split("\n")) {
-      if (line.startsWith("n") && line.slice(1) === wtPath) return true;
-    }
-  }
-  return false;
+  const list = pids.trim().split("\n").filter((p) => /^\d+$/.test(p));
+  if (!list.length) return false;
+
+  // One lsof for every pid, not one per pid. `-p` takes a comma-separated
+  // list, and the cost of an lsof call is almost entirely start-up: on a
+  // machine with 59 live `claude` processes — an ordinary day with several
+  // agents out — the per-pid loop took 3.69s and this takes 0.071s. That loop
+  // was 94% of `dispatch directory`, which made the directory slow enough that
+  // an orchestrator backgrounded it rather than wait.
+  const info = execQuiet(`lsof -a -p ${list.join(",")} -d cwd -Fn`);
+  if (!info) return false;
+  // Only the cwd lines matter: any process of this name sitting in the
+  // worktree answers the question, and which pid it was does not change it.
+  return info
+    .split("\n")
+    .some((line) => line.startsWith("n") && line.slice(1) === wtPath);
 }
 
 // ---------------------------------------------------------------------------
