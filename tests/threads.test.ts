@@ -34,6 +34,7 @@ import {
   type ThreadPost,
 } from "../src/threads.js";
 import { deliverPost, type DeliveryDeps } from "../src/commands.js";
+import { getAdapter } from "../src/agents.js";
 
 function store(): string {
   return mkdtempSync(join(tmpdir(), "dispatch-threads-"));
@@ -157,6 +158,47 @@ describe("the thread buffer", () => {
     createThread(dir, { members: ["bravo"], id: "t-new" });
     const ids = listThreads(dir).map((t) => t.meta.id);
     assert.deepEqual(ids.sort(), ["t-new", "t-old"]);
+  });
+});
+
+describe("a busy agent is reachable", () => {
+  // The failure this covers: four straight undelivered posts on 2026-08-31 to
+  // two agents running test suites back to back. Requiring a painted prompt
+  // meant delivery only landed at an idle agent — backwards, since an agent
+  // mid-way through work is exactly the one you need to reach before it
+  // collides with someone else.
+  //
+  // These drive the same predicates reachability() consults, against real
+  // captured screen text.
+  const claude = getAdapter("claude");
+  const codex = getAdapter("codex");
+
+  const reachable = (a: { isReady(s: string): boolean; isBusy(s: string): boolean }, screen: string) =>
+    a.isReady(screen) || a.isBusy(screen);
+
+  it("reaches a claude agent that is mid-turn with no composer painted", () => {
+    const midTurn = "  Bash(npm test)\n  ⎿  running…\n\n  ⏵⏵ esc to interrupt";
+    assert.equal(claude.isReady(midTurn), false, "precondition: no prompt is painted");
+    assert.equal(reachable(claude, midTurn), true, "but it is plainly alive and must be reachable");
+  });
+
+  it("reaches a codex agent that is mid-turn", () => {
+    const midTurn = "• Working (12s · esc to interrupt)";
+    assert.equal(codex.isReady(midTurn), false, "precondition: no composer");
+    assert.equal(reachable(codex, midTurn), true);
+  });
+
+  it("still reaches an idle agent sitting at its prompt", () => {
+    const idle = "Claude Code v9.9.9\n? for shortcuts";
+    assert.equal(reachable(claude, idle), true);
+  });
+
+  it("still refuses a pane that is a bare shell", () => {
+    // The case the readiness check existed for: an agent that exited leaves a
+    // live shell, and text pasted there runs as commands.
+    const shell = "ryanbrandt@mac ~/git/dispatch %";
+    assert.equal(reachable(claude, shell), false);
+    assert.equal(reachable(codex, shell), false);
   });
 });
 
