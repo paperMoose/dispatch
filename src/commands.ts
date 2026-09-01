@@ -70,6 +70,7 @@ import {
   excludeDispatchArtifacts,
   tailFile,
   getCmuxWorkspaceId,
+  liveAgentWorktrees,
 } from "./shell.js";
 import {
   createThread,
@@ -97,6 +98,7 @@ import {
   type ThreadPost,
 } from "./threads.js";
 import { readTurnState, type TurnState } from "./turnstate.js";
+import { recordAgent, readRegistry } from "./registry.js";
 import {
   readDnd,
   setDnd,
@@ -110,6 +112,7 @@ import {
   directoryJson,
   type DirectoryEntry,
 } from "./directory.js";
+import { parseCmuxWorkspaces, loadCmuxWorkspaceId } from "./cmux.js";
 import {
   cmuxSend,
   cmuxSendKey,
@@ -463,6 +466,15 @@ async function launchAgent(
     );
   }
 
+  // Machine-wide, so an orchestrator in another repository can still find it.
+  recordAgent({
+    id,
+    worktree: wtPath,
+    repo: gitRoot(),
+    branch,
+    launched: new Date().toISOString(),
+  });
+
   // Record launch in persistent history
   recordEvent({
     id,
@@ -778,6 +790,16 @@ export function cmdList(config: Config, brief = false): void {
         }
       }
       if (lastLine.length > 80) lastLine = lastLine.slice(0, 77) + "...";
+    }
+
+    // A declaration beats an inferred status. `list` used to show "idle" for
+    // an agent that had explicitly reported itself finished, which read as the
+    // declaration not having landed and got it sent again.
+    const declared = readDone(path || worktreePath(name, config));
+    if (declared) {
+      statusIcon = `${fmt.BLUE}✓${fmt.NC}`;
+      status = "done";
+      if (!lastLine && declared.summary) lastLine = declared.summary.split("\n")[0].slice(0, 80);
     }
 
     agents.push({ name, status, statusIcon, runtime, lastLine, pr });
@@ -3623,7 +3645,7 @@ export function cmdDirectory(args: string[], config: Config): void {
   // front of the JSON an agent is about to parse. Reading the directory needs
   // no multiplexer to be started, only queried.
   if (!json) ensureMultiplexer();
-  const entries = collectDirectory(config);
+  const entries = collectDirectory(config, args.includes("--all"));
   if (json) {
     console.log(directoryJson(entries));
     return;
@@ -3638,13 +3660,50 @@ export function cmdDirectory(args: string[], config: Config): void {
 /** Everything the directory reports, gathered from state dispatch already
  *  keeps: the multiplexer's window list, the worktree, the history file and
  *  the thread buffers. Nothing here is a field anyone has to maintain. */
-function collectDirectory(config: Config): DirectoryEntry[] {
-  if (!tmuxHasSession()) return [];
+function collectDirectory(config: Config, includeAll = false): DirectoryEntry[] {
   const threads = listThreads(threadsDir());
   const summaries = getAgentSummaries();
   const entries: DirectoryEntry[] = [];
 
-  for (const line of tmuxListWindows().split("\n")) {
+  // The multiplexer only knows about agents in the repository we are standing
+  // in. The registry knows about every agent this machine launched, which is
+  // what makes a swarm spanning repositories visible from any of them.
+  const lines = tmuxHasSession() ? tmuxListWindows().split("\n").filter(Boolean) : [];
+  const seen = new Set(lines.map((l) => l.split("|")[0]).filter(Boolean));
+
+  // Liveness for a registered agent is decided from its recorded path, not
+  // from the repository we happen to be in — that cwd-dependence is the whole
+  // bug. A worktree keeps its cmux marker after the workspace closes, so the
+  // marker must be checked against the live workspace list.
+  // One pair of commands for the whole machine. A cmux workspace outlives the
+  // agent that ran in it, so "the workspace exists" is not liveness — 83 of
+  // them were open here with almost nothing running. A live process cwd'd in
+  // the worktree is.
+  const liveWorktrees = liveAgentWorktrees();
+
+  // Which agents from other repositories are worth pulling in.
+  //
+  // Everything on the machine is the wrong default: 81 live agents across 149
+  // registered worktrees is a firehose, and it took 56 seconds to render. But
+  // the current repository alone is what made cross-repo coordination
+  // impossible in the first place.
+  //
+  // The useful middle is: anyone you are actually talking to. If two agents
+  // are coordinating across repositories they are in a thread together, and
+  // the thread names its members — so thread membership is exactly the set
+  // that needs to cross the boundary. `--all` is there for when you want the
+  // whole machine anyway.
+  const conversing = new Set(threads.flatMap((t) => t.meta.members));
+  for (const rec of readRegistry()) {
+    if (seen.has(rec.id)) continue;
+    if (!liveWorktrees.has(rec.worktree)) continue;
+    if (!includeAll && !conversing.has(rec.id)) continue;
+    seen.add(rec.id);
+    // Same shape the multiplexer emits: name|pid|path|dead|created.
+    lines.push(`${rec.id}||${rec.worktree}|0|`);
+  }
+
+  for (const line of lines) {
     if (!line) continue;
     const [name, pid, path, dead] = line.split("|");
     if (!name || name === "dispatch") continue;

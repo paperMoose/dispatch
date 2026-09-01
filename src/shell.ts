@@ -803,6 +803,30 @@ function descendants(root: string, depth = 4): string[] {
  *  On tmux the pane's PID is authoritative, so walk its descendants. cmux
  *  exposes no pane PID, so fall back to the cwd match, which is why the caller
  *  must also require a painted TUI. */
+/** Every worktree that currently has a live agent process in it, in two
+ *  commands rather than two per agent.
+ *
+ *  The directory has to answer "is this one alive" for every agent on the
+ *  machine, and doing that one at a time meant 83 agents took 57 seconds.
+ *  The cost is process start-up, not the query, so one pgrep and one lsof per
+ *  runtime answers it for all of them at once — the same batching that took a
+ *  single directory call from 4.4s to 0.65s. */
+export function liveAgentWorktrees(bins: string[] = ["claude", "codex"]): Set<string> {
+  const live = new Set<string>();
+  for (const bin of bins) {
+    const pids = execQuiet(`pgrep -x ${bin}`);
+    if (!pids) continue;
+    const list = pids.trim().split("\n").filter((p) => /^\d+$/.test(p));
+    if (!list.length) continue;
+    const info = execQuiet(`lsof -a -p ${list.join(",")} -d cwd -Fn`);
+    if (!info) continue;
+    for (const line of info.split("\n")) {
+      if (line.startsWith("n")) live.add(line.slice(1));
+    }
+  }
+  return live;
+}
+
 export function agentProcessAlive(
   wtPath: string,
   bin: string,
