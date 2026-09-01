@@ -447,6 +447,42 @@ describe("deliveryText", () => {
     assert.ok(text.includes("alpha, charlie"));
   });
 
+  it("tells a directly addressed recipient that it was asked", () => {
+    const asked = deliveryText(
+      meta,
+      { id: "p", ts: "", from: "alpha", text: "hi", hops: 0, to: ["bravo"] },
+      "bravo",
+    );
+    assert.match(asked, /put this to you directly/);
+  });
+
+  it("tells a copied-in recipient that it was not", () => {
+    // The observed failure, 2026-08-31 thread s2-group: a post named two other
+    // members, t2-alpha was copied on it, and t2-alpha answered — about a file
+    // it did not own. Every recipient got identical text, so "delivered to me"
+    // read as "asked of me".
+    const copied = deliveryText(
+      meta,
+      { id: "p", ts: "", from: "alpha", text: "hi", hops: 0, to: ["charlie"] },
+      "bravo",
+    );
+    assert.match(copied, /not to you/);
+    assert.match(copied, /kept in the loop, not asked/);
+  });
+
+  it("treats a broadcast as keeping people informed, not as asking them", () => {
+    // No `to` at all: everyone in the thread hears it, nobody was asked.
+    assert.match(text, /kept in the loop, not asked/);
+  });
+
+  it("forbids repeating back what you were just told", () => {
+    // The etiquette stopped "thanks" and "confirmed" but not agreeing at
+    // length: in s1-factual an agent restated four identical grep hits it had
+    // just been sent, and the chain ran two posts longer than it needed to.
+    assert.match(text, /repeat back what you were/);
+    assert.match(text, /interruption with extra steps/);
+  });
+
   it("forbids the acknowledgement that turns a thread into a loop", () => {
     // Observed live on 2026-08-31: two agents settled a real question in two
     // hops, then spent hops 3, 4 and 5 on "Confirmed", "Correct", "Thanks".

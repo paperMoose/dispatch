@@ -2130,7 +2130,9 @@ dispatch dnd                                          # who is currently on do-n
 
 **Start one when you are actually stuck**, which means one of two things: you have hit a blank — something you cannot find, cannot reach, or cannot decide alone — or you have been wrong about the same thing more than once and the loop is not breaking. Then check \`dispatch directory\`, pick the one agent most likely to know, and ask a specific answerable question. Not "any thoughts on the auth refactor" — "does your change touch session.ts, yes or no".
 
-**Never reply to acknowledge.** No "thanks", no "confirmed", no "got it", no restating what you were just told. If your reply does not change what someone does next, do not send it. Two agents being polite to each other is an infinite loop, and both of them think they are being professional.
+**Never reply to acknowledge.** No "thanks", no "confirmed", no "got it". And no repeating back what you were just told in your own words — agreeing at length is the same interruption as thanking, with extra steps. If your reply does not change what someone does next, do not send it. Two agents being polite to each other is an infinite loop, and both of them think they are being professional.
+
+**Being copied in is not being asked.** A post that names other members, or one broadcast to the whole thread, is keeping you informed. Delivery says which case it is. Stay out of it unless you know something they need and do not have — answering a question that was put to someone else is the most common way a thread turns into noise.
 
 **Send the experiment, not the opinion.** The most useful thing you can put in a thread is not what you concluded — it is how the other agent can reach the same conclusion without trusting you. Run something first, then post what you ran and what it printed:
 
