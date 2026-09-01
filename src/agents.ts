@@ -414,12 +414,30 @@ const claudeAdapter: AgentAdapter = {
   },
 
   dismissStartupDialog(content) {
-    if (
-      /Do you trust the files in this folder\?|trust the files in this folder/i.test(content) &&
-      /1\.\s*Yes/i.test(content)
-    ) {
-      return "1";
-    }
+    const asking =
+      /Do you trust the files in this folder\?|trust the files in this folder|Is this a project you created or one you trust/i.test(
+        content,
+      );
+    if (!asking) return null;
+
+    // Older builds numbered the options, so typing the digit answered it.
+    if (/1\.\s*Yes/i.test(content)) return "1";
+
+    // Current builds render an arrow-key menu and default to the destructive
+    // option, which is why this matters:
+    //
+    //     ❯ No, exit
+    //       Yes, I trust this folder
+    //
+    // There is no digit to type. Matching only the numbered form meant every
+    // claude agent launched into a fresh worktree sat on this dialog forever
+    // with "No, exit" selected — it looked alive to every process check and
+    // never received its prompt. Observed 2026-08-31 across a whole evening of
+    // agents that appeared to be running and were not.
+    //
+    // Move the selection off the default and confirm. The keys are sent as
+    // keys rather than typed, hence the prefix.
+    if (/Yes, I trust this folder/i.test(content)) return "key:down enter";
     return null;
   },
 

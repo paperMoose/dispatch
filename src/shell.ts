@@ -445,6 +445,20 @@ export function tmuxSendText(id: string, text: string): void {
   execSync(`tmux send-keys -t "${tmuxTarget(id)}" "${text}" Enter`);
 }
 
+/** Send one named key to an agent's pane, on whichever backend it runs.
+ *  Distinct from tmuxSendText, which types characters: a menu that is driven
+ *  by arrow keys cannot be answered with text. */
+export function tmuxSendKey(id: string, key: string): void {
+  if (useCmux()) {
+    const wsId = getCmuxWorkspaceId(id);
+    if (wsId) cmuxSendKey(wsId, key);
+    return;
+  }
+  // tmux names keys with an initial capital: Down, Enter.
+  const named = key.charAt(0).toUpperCase() + key.slice(1);
+  execQuiet(`tmux send-keys -t "${tmuxTarget(id)}" ${named}`);
+}
+
 export function tmuxCapture(id: string, lines: number): string {
   if (useCmux()) {
     const wsId = getCmuxWorkspaceId(id);
@@ -873,6 +887,16 @@ export function waitForAgent(
     }
 
     const keys = adapter.dismissStartupDialog(content);
+    if (keys && keys.startsWith("key:")) {
+      // A menu that has to be navigated rather than typed into. Sent as key
+      // events, and nothing is typed, so no stray text lands in the composer
+      // if the dialog closes between the read and the write.
+      log.dim(`  Answering ${adapter.bin} startup dialog`);
+      for (const k of keys.slice(4).split(" ").filter(Boolean)) {
+        tmuxSendKey(id, k);
+      }
+      continue;
+    }
     if (keys) {
       log.dim(`  Dismissing ${adapter.bin} startup dialog`);
       tmuxSendText(id, keys);
