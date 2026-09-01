@@ -1147,17 +1147,19 @@ export function cmdSend(args: string[], config: Config): void {
   const unreadable = !screen.trim();
   if (unreadable) {
     log.warn(`Could not read ${id}'s screen; sending on the strength of its live ${adapter.bin} process.`);
-  } else if (!adapter.isReady(screen) && !adapter.isBusy(screen)) {
-    log.error(`No ${adapter.bin} prompt is visible in ${id}, so nothing was sent.`);
-    log.dim(`  Check it first: dispatch attach ${id}`);
+  } else if (adapter.dismissStartupDialog(screen)) {
+    // Named before the generic case, and before typing: a modal swallows text
+    // and reads Enter as answering it, so a message here would confirm a trust
+    // prompt instead of reaching anyone. Saying which dialog is the difference
+    // between relaunching the agent and debugging the wrong layer for an hour.
+    log.error(`${id} is blocked on ${adapter.bin}'s startup dialog and has never started.`);
+    log.dim("  It never received its prompt either.");
+    log.dim(`  Relaunch on dispatch 0.12.2+, which answers it, or: dispatch attach ${id}`);
     process.exit(1);
-  }
-
-  // A modal dialog swallows typed text and reads Enter as answering it, so a
-  // message here would silently confirm a permission or trust prompt instead.
-  if (!unreadable && adapter.dismissStartupDialog(screen)) {
-    log.error(`${adapter.bin} is waiting on a dialog in ${id}, so nothing was sent.`);
-    log.dim(`  Answer it first: dispatch attach ${id}`);
+  } else if (!adapter.isReady(screen) && !adapter.isBusy(screen)) {
+    log.error(`No ${adapter.bin} TUI in ${id}, so nothing was sent.`);
+    log.dim(`  Last line on its screen: ${lastScreenLine(screen)}`);
+    log.dim(`  Check it first: dispatch attach ${id}`);
     process.exit(1);
   }
 
@@ -2923,6 +2925,13 @@ export function cmdSchedule(args: string[]): void {
  *  The `why` is written for whoever is about to be told their post did not
  *  arrive, so it says what to do next rather than naming a state. It is stored
  *  verbatim in the thread's delivery record. */
+/** The last non-blank line of a captured screen, for error messages. What is
+ *  on the screen is the evidence; "no prompt is visible" is not. */
+function lastScreenLine(screen: string): string {
+  const l = screen.trim().split("\n").filter((x) => x.trim()).slice(-1)[0];
+  return l ? l.trim().slice(0, 80) : "(blank)";
+}
+
 export function reachability(
   id: string,
   config: Config,
@@ -2993,15 +3002,30 @@ export function reachability(
   // than refusing. And busy is stronger evidence of life than a painted
   // composer: a dead agent's composer lingers in scrollback, but "esc to
   // interrupt" means something is actually running.
-  if (!adapter.isReady(screen) && !adapter.isBusy(screen)) {
+  // The specific reason first, always. This check used to sit below the generic
+  // one, so an agent blocked on the trust-this-folder dialog was reported as
+  // "nothing is running in it" — a true observation and a useless one. An
+  // orchestrator reading that spent an evening concluding dispatch could not
+  // write to cmux panes, when the pane was fine and the agent behind it had
+  // never started. A diagnosis naming the wrong cause is worse than none,
+  // because it gets acted on.
+  if (adapter.dismissStartupDialog(screen)) {
     return {
       ok: false,
-      why: `no ${adapter.bin} prompt is visible in its pane, and nothing is running in it`,
+      why:
+        `blocked on ${adapter.bin}'s startup dialog and has never started — ` +
+        `it never received its prompt either. Relaunch on dispatch 0.12.2+, ` +
+        `which answers it, or answer it yourself: dispatch attach ${id}`,
       dnd: false,
     };
   }
-  if (adapter.dismissStartupDialog(screen)) {
-    return { ok: false, why: "waiting on a dialog — answer it with 'dispatch attach'", dnd: false };
+  if (!adapter.isReady(screen) && !adapter.isBusy(screen)) {
+    // Say what IS on screen. "No prompt" is the one thing the reader knows.
+    return {
+      ok: false,
+      why: `no ${adapter.bin} TUI in its pane — last line on screen: ${lastScreenLine(screen)}`,
+      dnd: false,
+    };
   }
   return { ok: true, why: "", dnd: false };
 }

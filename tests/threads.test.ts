@@ -161,6 +161,40 @@ describe("the thread buffer", () => {
   });
 });
 
+describe("saying what is actually wrong", () => {
+  // The night this came from: dispatch reported "nothing is running in it" for
+  // nine agents that were sitting on a trust dialog. True, and useless — the
+  // orchestrator reading it concluded dispatch could not write to cmux panes
+  // and spent hours building a workaround for a problem that did not exist.
+  // A diagnosis naming the wrong cause is worse than none, because it is acted
+  // on.
+  const claude = getAdapter("claude");
+
+  const TRUST_DIALOG = [
+    " Quick safety check: Is this a project you created or one you trust?",
+    " ❯ No, exit",
+    "   Yes, I trust this folder",
+    " Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+  it("recognises the dialog before it reaches the generic case", () => {
+    // Both are true of this screen: no TUI is painted, and a dialog is up.
+    // The order decides which one the reader is told, and only one of them
+    // says what to do next.
+    assert.equal(claude.isReady(TRUST_DIALOG), false);
+    assert.equal(claude.isBusy(TRUST_DIALOG), false);
+    assert.ok(
+      claude.dismissStartupDialog(TRUST_DIALOG),
+      "the specific check must match, so it can be reported first",
+    );
+  });
+
+  it("does not mistake a working agent for a blocked one", () => {
+    const working = "  Bash(npm test)\n  ⏵⏵ esc to interrupt";
+    assert.equal(claude.dismissStartupDialog(working), null);
+  });
+});
+
 describe("a busy agent is reachable", () => {
   // The failure this covers: four straight undelivered posts on 2026-08-31 to
   // two agents running test suites back to back. Requiring a painted prompt
