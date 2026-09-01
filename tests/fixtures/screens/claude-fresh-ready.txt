@@ -1,0 +1,34 @@
+▐▛███▛█   Claude Code v2.1.252
+▝▜██████▀  Opus 5 · Claude Max
+  ▝▝ ▝▝    ~/git/vunda-customers/noah/repos/noah-voice/.worktrees/review-ivr-rebuild
+
+⚠ 2 MCP servers need authentication · run /mcp
+  ⎿  SessionStart:startup says: 
+     [Bitfab] Update available: v0.9.53 → v0.9.96.
+               Run /bitfab:update to update, or enable auto-update: /plugin → Marketplaces → bitfab
+     → Enable auto-update
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+───────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ don't ask on (shift+tab to cycle) · ← 2 agents                                           /rc

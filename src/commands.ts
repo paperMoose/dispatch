@@ -96,6 +96,7 @@ import {
   type ThreadMeta,
   type ThreadPost,
 } from "./threads.js";
+import { readTurnState, type TurnState } from "./turnstate.js";
 import {
   readDnd,
   setDnd,
@@ -3674,13 +3675,24 @@ function collectDirectory(config: Config): DirectoryEntry[] {
     // The declaration wins over anything inferred: an agent that says it is
     // finished is finished, whatever its pane looks like.
     const done = readDone(wtPath);
+    // The transcript is the agent's own record of what it was doing, so it
+    // beats anything inferred from the pane. Kept behind the explicit `done`
+    // declaration, which beats everything.
+    const turn = readTurnState(
+      getAdapter(state.agent || config.agent).findSessionFile(wtPath),
+      state.agent || config.agent,
+    );
     const lifecycle: DirectoryEntry["state"] = done
       ? "done"
       : status === "exited"
         ? "exited"
-        : status === "running"
+        : turn.state === "working"
           ? "working"
-          : "idle";
+          : turn.state === "waiting"
+            ? "idle"
+            : status === "running"
+              ? "working"
+              : "idle";
 
     entries.push({
       id: name,
@@ -3689,6 +3701,7 @@ function collectDirectory(config: Config): DirectoryEntry[] {
       branch:
         execQuiet(`git -C "${wtPath}" rev-parse --abbrev-ref HEAD`) || hist?.branch || name,
       state: lifecycle,
+      turn: { state: turn.state, idleSeconds: turn.idleSeconds, evidence: turn.evidence },
       ...(done ? { done } : {}),
       status,
       reachable: reach.ok,

@@ -1,0 +1,40 @@
+self._agent._chat_ctx.insert(new_message)
+
+  Any turn whose reply is interrupted before scheduling, or that arrives while scheduling is paused mid-shutdown, is gone permanently. Outbound IVR calls hit this hardest: muted
+  agent, rapid menu finals interrupting each other, hangup while scheduling drains.
+
+  Both persistence paths now build from a CallTranscript fed by user_input_transcribed (every final STT result, ahead of all turn logic) and conversation_item_added, registered
+  before session.start(). Every entry carries a phase — screening / ivr / voicemail / conversation.
+
+  The phase key alone wasn't enough, and the review caught this before it shipped: every noah-server consumer flattens entries to "{role}: {content}" and ignores unknown keys. Since
+  IVR audio now reaches the webhook in volume where it previously did not, shipping as-is would have put User: For reservations, press two into the exec's post-call SMS. The
+  outgoing payload now labels the content itself ([automated menu]); the in-memory record stays clean for grading.
+
+  The 40 zero-assistant calls — reported, not guessed, in docs/transcript-completeness.md. Two mechanisms fit the code: the agent never becoming audible (correctly one-sided,
+  ivr_stuck), and the same scheduling drop on the assistant side. turns_by_role on the Braintrust span is the query that separates them. No prod call IDs were reachable from here,
+  so that stays a hypothesis with a stated test.
+
+  Job 2 — models
+
+  deepgram/flux-general-en kept (id confirmed), TTS → cartesia/sonic-3.5, LLM → openai/gpt-4.1. I disqualified every reasoning-tier model on first-token latency — LiveKit floors
+  OpenAI reasoning_effort at "low", and Gemini 3's thinking_level is a plugin param, not an Inference one. I also rejected LiveKit's own recommended voice default (gemma-4-31b-it)
+  as optimizing the axis we aren't losing on.
+
+  The endpointing question: no double-detection, because c5c7fec already removed MultilingualModel(). Confirmed in the SDK rather than inferred — audio_recognition.py:117 sets the
+  turn detector to None whenever turn_detection is a string. But max_endpointing_delay is now inert, so the test plan was asking you to tune a variable that does nothing; I removed
+  that column. min_endpointing_delay is a 0.5s floor after Flux's EOT and is the biggest remaining lever, env-tunable without a deploy. I left the default alone — that should move
+  on measured calls.
+
+  One thing before merging: no call was placed and there are no credentials here, so "the docs list this id" is my ceiling. One dev call needs to confirm tts_ttfb is non-empty on
+  the Braintrust span — that proves the TTS id and the voice= pairing were both accepted. A rejected pairing means silent prod calls. The model swap is its own commit so it reverts
+  without touching the transcript fix.
+
+✻ Crunched for 22m 45s · done 9:31 PM · 4 shells still running
+
+※ recap: Both jobs are done and pushed to voice-transcript-models: the transcript now records both sides of every call, and the LLM and TTS models are upgraded to verified ids. 
+  Next: place one dev call to confirm the new TTS model works before merging. (disable recaps in /config)
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ don't ask on · 4 shells · ← 2 agents · ↓ to manage                                                                                                                         /rc

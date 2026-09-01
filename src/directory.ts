@@ -179,6 +179,11 @@ export interface DirectoryEntry {
    *  rather than from guessing at a quiet pane. `working` and `idle` remain
    *  inferred and remain unreliable — that is exactly why `done` is not. */
   state: "done" | "working" | "idle" | "exited";
+  /** What the agent's own transcript says it is doing, and how stale that
+   *  reading is. Carried separately from `state` so a reader can see the
+   *  evidence rather than only the verdict — the verdict is what was wrong all
+   *  the previous times. */
+  turn?: { state: string; idleSeconds: number; evidence: string };
   /** Set when state is "done". */
   done?: { at: string; summary: string; pr: string; handoff: string };
   /** running: the agent CLI has live children. idle: the window is there and
@@ -198,6 +203,12 @@ export interface DirectoryEntry {
   threads: string[];
   /** Posts addressed to it that no pane write has carried. */
   waiting: number;
+}
+
+function fmtAge(sec: number): string {
+  if (sec < 90) return `${sec}s`;
+  if (sec < 5400) return `${Math.round(sec / 60)}m`;
+  return `${Math.round(sec / 3600)}h`;
 }
 
 export function directoryJson(entries: DirectoryEntry[]): string {
@@ -240,6 +251,12 @@ export function formatDirectory(
     );
     if (e.working) {
       out.push(`    working: ${e.working} ${fmt.DIM}(${e.workingFrom})${fmt.NC}`);
+    }
+    if (e.turn && e.turn.state === "never-started") {
+      out.push(`    ${fmt.RED}never started${fmt.NC} — it has not been given a prompt`);
+    } else if (e.turn && e.turn.state !== "unknown") {
+      const stale = e.turn.idleSeconds >= 0 ? `, quiet ${fmtAge(e.turn.idleSeconds)}` : "";
+      out.push(`    turn:    ${e.turn.state}${stale}  ${fmt.DIM}(${e.turn.evidence})${fmt.NC}`);
     }
     if (e.threads.length) {
       out.push(
