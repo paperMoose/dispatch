@@ -175,6 +175,7 @@ const DISPATCH_ARTIFACTS = [
   ".dispatch-cmux-workspace",
   ".dispatch.log",
   ".dispatch-dnd",
+  ".dispatch-done",
 ];
 
 /** Hide dispatch's own files from git.

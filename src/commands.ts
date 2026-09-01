@@ -100,6 +100,9 @@ import {
   readDnd,
   setDnd,
   clearDnd,
+  readDone,
+  setDone,
+  clearDone,
   agentIdFromPath,
   describeWork,
   formatDirectory,
@@ -312,6 +315,15 @@ async function launchAgent(
     prompt = input;
   }
 
+  // Appended to every dispatched brief, so knowing to report back does not
+  // depend on ~/.claude/CLAUDE.md being current — an agent launched today from
+  // a machine whose docs are a week stale still reports. Kept to two lines:
+  // this rides on top of the user's own prompt and every line competes with it.
+  const REPORT_BACK =
+    "\n\nWhen you are finished and past your own review, run:\n" +
+    '  dispatch done "one line on what you did" --handoff "anything a person still has to do"\n' +
+    "That is how the orchestrator knows you are done; without it, it cannot tell you apart from an agent still thinking.";
+
   // Override id and branch if --name was provided
   if (nameOverride) {
     id = slugify(nameOverride) || nameOverride;
@@ -342,6 +354,8 @@ async function launchAgent(
       }
     }
   }
+
+  prompt = prompt.trimEnd() + REPORT_BACK;
 
   // Check if already running
   if (sessionExists(id)) {
@@ -1330,6 +1344,12 @@ export function cmdResume(args: string[], config: Config): void {
   ensureMultiplexer();
 
   const wtPath = worktreePath(id, config);
+  // An agent picked back up is working again. Leaving its old declaration in
+  // place would tell the orchestrator to stop watching the one thing that just
+  // started moving.
+  if (clearDone(wtPath)) {
+    log.dim(`  cleared the earlier 'done' — ${id} is working again`);
+  }
   if (!existsSync(wtPath)) {
     log.error(`Worktree not found for '${id}'. Nothing to resume.`);
     process.exit(1);
@@ -2108,6 +2128,14 @@ dispatch cleanup HEY-123 --delete-branch              # Remove worktree + branch
 dispatch cleanup --all --delete-branch                # Clean up everything
 dispatch prune --merged --delete-branch               # Remove worktrees with merged PRs
 \`\`\`
+
+**An agent tells you when it is done — it does not leave you guessing.** Every dispatched brief ends with an instruction to run `dispatch done` once the agent is past its own review, so you do not have to infer completion from a quiet pane. `dispatch directory` then shows `done` alongside what it did, what it left for a person, and the PR.
+
+```bash
+dispatch done "rewrote the IVR detector" --handoff "someone has to pick a threshold"
+```
+
+Inference cannot do this job: a finished agent, an agent mid-way through a 4,000-test suite, and an agent stuck all look the same from outside. `dispatch resume` clears the declaration, because a resumed agent is working again.
 
 **Agents can talk to each other.** \`dispatch directory\` lists every running agent, what it is working on (read from its brief, its history event, or its last message — nothing to keep up to date by hand) and whether it can be reached; \`--json\` for a machine-readable form. A thread is a shared buffer several agents confer in: each post is appended to \`.dispatch-threads/<id>.jsonl\` and typed into the other members' panes carrying the thread id, so they can reply into the same buffer.
 
@@ -3473,6 +3501,75 @@ function liveAgentIds(): string[] {
     .filter((name) => name && name !== "dispatch");
 }
 
+/** An agent declaring, in its own words, that it has finished.
+ *
+ *  The one signal an orchestrator can trust. Everything else it might use —
+ *  a quiet pane, no child process, a branch that stopped moving — is also
+ *  what a long test run looks like, so watching seven agents it could not say
+ *  which were waiting on it. This is not inferred, so it cannot be wrong. */
+export function cmdDone(args: string[], config: Config): void {
+  const take = (flag: string): string => {
+    const i = args.indexOf(flag);
+    if (i === -1) return "";
+    const v = args[i + 1] || "";
+    args.splice(i, 2);
+    return v;
+  };
+  const summaryFlag = take("--summary");
+  const handoff = take("--handoff");
+  let pr = take("--pr");
+
+  const positional = args.filter((a) => !a.startsWith("--"));
+  // `dispatch done <id> ...` from outside, or `dispatch done "..."` inside a
+  // worktree, where the id is inferred and the text is the summary.
+  const caller = callerId(config);
+  const id = caller || positional[0];
+  const summary = summaryFlag || (caller ? positional.join(" ") : positional.slice(1).join(" "));
+
+  if (!id) {
+    log.error('Usage: dispatch done "<what you did>" [--handoff "<what is left>"]');
+    log.dim("  Run it from inside your own worktree; the agent id is inferred.");
+    log.dim("  From outside: dispatch done <agent-id> --summary \"...\"");
+    process.exit(1);
+  }
+
+  const wtPath = worktreePath(id, config);
+  if (!existsSync(wtPath)) {
+    log.error(`No worktree for agent '${id}' at ${wtPath}`);
+    process.exit(1);
+  }
+
+  // Looked up rather than asked for: an agent that just pushed knows the
+  // branch, and making it paste a URL is one more thing to get wrong.
+  if (!pr) {
+    const found = execQuiet(
+      `gh pr list --head "${id}" --state all --json url --jq '.[0].url'`,
+    );
+    if (found && found.startsWith("http")) pr = found;
+  }
+
+  const done = setDone(wtPath, { summary: summary.slice(0, 2000), pr, handoff: handoff.slice(0, 2000) });
+  excludeDispatchArtifacts(wtPath);
+
+  recordEvent({
+    id,
+    event: "completed",
+    ts: done.at,
+    summary: summary.slice(0, 500),
+    pr,
+  });
+
+  notify(`${id} is done`, summary.slice(0, 140) || "No summary given");
+
+  log.ok(`${fmt.BOLD}${id}${fmt.NC} marked done`);
+  if (summary) log.dim(`  ${summary.split("\n")[0].slice(0, 100)}`);
+  if (pr) log.dim(`  ${pr}`);
+  if (handoff) log.dim(`  left for a person: ${handoff.split("\n")[0].slice(0, 100)}`);
+  if (!summary) {
+    log.warn("  No summary given — whoever reads this will have to open the diff.");
+  }
+}
+
 export function cmdDirectory(args: string[], config: Config): void {
   const json = args.includes("--json");
   // ensureMultiplexer announces the backend on stdout, which would sit in
@@ -3528,6 +3625,16 @@ function collectDirectory(config: Config): DirectoryEntry[] {
     const mine = threads.filter((t) => t.meta.members.includes(name));
     const dnd = readDnd(wtPath);
     const reach = reachability(name, config);
+    // The declaration wins over anything inferred: an agent that says it is
+    // finished is finished, whatever its pane looks like.
+    const done = readDone(wtPath);
+    const lifecycle: DirectoryEntry["state"] = done
+      ? "done"
+      : status === "exited"
+        ? "exited"
+        : status === "running"
+          ? "working"
+          : "idle";
 
     entries.push({
       id: name,
@@ -3535,6 +3642,8 @@ function collectDirectory(config: Config): DirectoryEntry[] {
       // switched branches mid-run would otherwise be reported on the wrong one.
       branch:
         execQuiet(`git -C "${wtPath}" rev-parse --abbrev-ref HEAD`) || hist?.branch || name,
+      state: lifecycle,
+      ...(done ? { done } : {}),
       status,
       reachable: reach.ok,
       ...(reach.ok ? {} : { unreachable: reach.why }),
