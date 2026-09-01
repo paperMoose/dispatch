@@ -84,6 +84,8 @@ import {
   pendingFor,
   parseMentions,
   mayDeliver,
+  approvedAtBirth,
+  approveThread,
   heldForApproval,
   threadExists,
   threadsDir,
@@ -2127,9 +2129,13 @@ dispatch thread pending                               # what is waiting on your 
 dispatch thread approve t-4f2a                        # release it into the recipients' panes
 \`\`\`
 
-**By default an agent cannot interrupt another agent on its own authority.** A pane write lands mid-turn in whatever that agent was doing, so agent-written posts are held: the post goes into the buffer, nobody is woken, you get a notification, and \`dispatch thread pending\` shows what is waiting. Your own posts are never gated — that is what keeps a human able to break into a stalled thread.
+**Forming a group needs your say-so; talking inside one does not.** A thread you create is sanctioned because you created it, and its members then coordinate freely. A thread an *agent* creates waits: nobody is interrupted, you get a notification, and \`dispatch thread pending\` lists it. One \`dispatch thread approve <tid>\` opens it for good — approving every message would make a swarm unusable, and a swarm keeping out of its own way is what this is for.
 
-Set \`thread_delivery: auto\` in \`~/.dispatch.yml\` (or \`DISPATCH_THREAD_DELIVERY=auto\`) to let agents through everywhere, or \`dispatch thread new a b --auto\` to open one unsupervised thread while everything else stays gated — which is how to measure whether unsupervised chatter actually helps.
+Your own posts are never gated, which is also what keeps you able to break into a thread that has hit the hop limit.
+
+Set \`thread_delivery: auto\` in \`~/.dispatch.yml\` (or \`DISPATCH_THREAD_DELIVERY=auto\`) to let agents form their own groups unsupervised — worth doing deliberately to find out whether it helps.
+
+**Telling an agent to organise the others works:** "start a group chat with X and Y so you do not step on each other" — the agent runs \`thread new\`, you approve once, and they sort out ownership among themselves.
 
 **Inside an agent, \`--from\` is optional** — run from your own worktree, dispatch knows who you are. Same for \`dispatch dnd on\`, which is how an agent protects a stretch of careful work.
 
@@ -3030,9 +3036,6 @@ export function cmdThread(args: string[], config: Config): void {
     const topic = take("--topic") || "";
     const idOverride = take("--id");
     const maxHopsArg = take("--max-hops");
-    // Opt one thread out of the approval gate, so unsupervised agent chatter
-    // can be measured against the default without loosening the default.
-    const autoDeliver = rest.includes("--auto");
     const members = rest.filter((a) => !a.startsWith("--"));
     if (members.length < 1) {
       log.error('Usage: dispatch thread new <agent-id> [<agent-id>...] [--topic "..."]');
@@ -3053,7 +3056,13 @@ export function cmdThread(args: string[], config: Config): void {
       process.exit(1);
     }
 
-    const meta = createThread(dir, { members, topic, id: idOverride, maxHops, autoDeliver });
+    // Who is forming this group is the question that matters. You forming one
+    // is the approval; an agent forming one is the thing to sanction.
+    const approved = approvedAtBirth({
+      fromAgent: !!callerId(config),
+      mode: config.threadDelivery,
+    });
+    const meta = createThread(dir, { members, topic, id: idOverride, maxHops, approved });
     log.ok(`Thread ${fmt.BOLD}${meta.id}${fmt.NC} created`);
     log.dim(`  members: ${meta.members.join(", ")}`);
     if (meta.topic) log.dim(`  topic: ${meta.topic}`);
@@ -3064,10 +3073,13 @@ export function cmdThread(args: string[], config: Config): void {
       const r = reachability(m, config);
       if (!r.ok) log.warn(`  ${m}: ${r.why}`);
     }
-    if (meta.autoDeliver) {
-      log.warn("  --auto: agents in this thread interrupt each other without asking you");
-    } else if (config.threadDelivery !== "auto") {
-      log.dim("  agent posts are held until you run: dispatch thread approve " + meta.id);
+    if (!approved) {
+      log.warn("  Waiting for approval — until then nobody in it is interrupted.");
+      log.dim(`  A person approves the group with: dispatch thread approve ${meta.id}`);
+      notify(
+        `An agent wants to start a group chat`,
+        `${meta.members.join(", ")}${meta.topic ? ` — ${meta.topic}` : ""}\n\nApprove: dispatch thread approve ${meta.id}`,
+      );
     }
     log.dim(`  post:    dispatch thread post ${meta.id} --from <you> "message"`);
     return;
@@ -3118,7 +3130,7 @@ export function cmdThread(args: string[], config: Config): void {
     // command is the approval, and an agent cannot promote itself by claiming
     // to be one.
     const fromAgent = !!callerId(config);
-    const allowed = mayDeliver(t.meta, { fromAgent, mode: config.threadDelivery });
+    const allowed = mayDeliver(t.meta, { fromAgent });
 
     let delivered: string[] = [];
     let undelivered: { id: string; why: string }[] = [];
@@ -3133,8 +3145,8 @@ export function cmdThread(args: string[], config: Config): void {
       // The whole point of gating is that it does not happen behind your back.
       if (undelivered.length) {
         notify(
-          `${from} wants to reach ${undelivered.map((u) => u.id).join(", ")}`,
-          `${text.slice(0, 120)}\n\nRelease: dispatch thread approve ${id}`,
+          `${from} is waiting on an unapproved group`,
+          `${text.slice(0, 120)}\n\nApprove: dispatch thread approve ${id}`,
         );
       }
     }
@@ -3144,8 +3156,8 @@ export function cmdThread(args: string[], config: Config): void {
 
     log.ok(`Posted to ${fmt.BOLD}${id}${fmt.NC} as ${from}`);
     if (!allowed) {
-      log.warn(`  Held for approval — no pane was written to.`);
-      log.dim(`  A person releases it with: dispatch thread approve ${id}`);
+      log.warn(`  This group is not approved, so no pane was written to.`);
+      log.dim(`  A person approves it once with: dispatch thread approve ${id}`);
     }
     if (mentioned.length) log.dim(`  addressed: ${mentioned.join(", ")}`);
     if (replay) log.dim(`  replay: ${replay}`);
@@ -3209,6 +3221,14 @@ export function cmdThread(args: string[], config: Config): void {
       log.dim("  What is waiting: dispatch thread pending");
       process.exit(1);
     }
+    // Approve the group first: from here on its members talk freely, which is
+    // what makes this usable for a swarm. The flush below is only the backlog
+    // that accumulated while it waited.
+    const wasApproved = readThread(dir, id)!.meta.approved !== false;
+    if (!wasApproved) {
+      approveThread(dir, id);
+      log.ok(`Approved ${fmt.BOLD}${id}${fmt.NC} — its members can now reach each other`);
+    }
     const t = readThread(dir, id)!;
     const deps = liveDelivery(config);
     let sent = 0;
@@ -3232,15 +3252,29 @@ export function cmdThread(args: string[], config: Config): void {
         }
       }
     }
-    if (sent) log.ok(`Released ${sent} message${sent === 1 ? "" : "s"} in ${fmt.BOLD}${id}${fmt.NC}`);
-    else log.info(`Nothing was waiting in ${id}`);
+    if (sent) log.dim(`  delivered ${sent} message${sent === 1 ? "" : "s"} that had been waiting`);
+    else if (wasApproved) log.info(`${id} was already approved, and nothing was waiting`);
     return;
   }
 
   if (sub === "pending") {
-    // What is waiting on you, across every thread. The answer to "has anything
-    // been trying to reach an agent while I was not looking".
+    // What is waiting on you, across every thread. The answer to "has an agent
+    // been trying to start a conversation while I was not looking".
     let any = false;
+    const unapproved = listThreads(dir).filter((t) => t.meta.approved === false);
+    if (unapproved.length) {
+      any = true;
+      console.log(`${fmt.BOLD}Groups waiting for your approval${fmt.NC}`);
+      for (const t of unapproved) {
+        console.log(
+          `  ${fmt.BOLD}${t.meta.id}${fmt.NC}  ${t.meta.members.join(", ")}` +
+            `${t.meta.topic ? `  ${fmt.DIM}${t.meta.topic}${fmt.NC}` : ""}` +
+            `  ${fmt.DIM}${t.posts.length} message${t.posts.length === 1 ? "" : "s"} queued${fmt.NC}`,
+        );
+        log.dim(`    approve: dispatch thread approve ${t.meta.id}`);
+      }
+      console.log();
+    }
     for (const t of listThreads(dir)) {
       const waiting = new Map<string, ThreadPost[]>();
       for (const m of t.meta.members) {

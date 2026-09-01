@@ -93,10 +93,19 @@ export interface ThreadMeta {
    *  count is exact, where two clock readings in the same millisecond are not
    *  ordered at all. */
   joinedAfter: Record<string, number>;
-  /** This thread delivers agent posts without waiting for a person, whatever
-   *  the global setting. Set with `thread new --auto`, so one experiment can
-   *  run unsupervised while everything else stays gated. */
-  autoDeliver?: boolean;
+  /** Whether a person has sanctioned this group.
+   *
+   *  The unit of permission is the group, not the message. Deciding *who gets
+   *  interrupted* is the consequential act; once you have said "you three
+   *  coordinate on this", approving each message they exchange is friction
+   *  that would make a swarm unusable — which is the case this feature is most
+   *  useful for. A thread you create is approved because you created it. A
+   *  thread an agent creates waits, because an agent has just decided on its
+   *  own to start interrupting people.
+   *
+   *  Absent means approved: only an agent-created group ever sets it false, so
+   *  nothing silently stops delivering. */
+  approved?: boolean;
 }
 
 /** What a post actually reached. `undelivered` covers every reason a member's
@@ -151,7 +160,7 @@ export function createThread(
     topic?: string;
     id?: string;
     maxHops?: number;
-    autoDeliver?: boolean;
+    approved?: boolean;
   },
 ): ThreadMeta {
   const id = opts.id || `t-${randomBytes(3).toString("hex")}`;
@@ -169,7 +178,7 @@ export function createThread(
     created,
     maxHops: opts.maxHops ?? DEFAULT_MAX_HOPS,
     joinedAfter: Object.fromEntries(members.map((m) => [m, 0])),
-    ...(opts.autoDeliver ? { autoDeliver: true } : {}),
+    ...(opts.approved === false ? { approved: false } : {}),
   };
   writeFileSync(threadFile(dir, id), JSON.stringify({ meta }) + "\n", {
     mode: 0o600,
@@ -296,26 +305,46 @@ export function nextHops(t: Thread, from: string): number {
   return 0;
 }
 
-/** Why a post was not typed into a pane, when a person has not released it.
+/** Why a post was not typed into a pane, when the group is not yet sanctioned.
  *  Stored verbatim in the delivery record and shown to the sender, so an agent
  *  waiting for an answer learns that nobody has been woken yet. */
 export function heldForApproval(threadId: string): string {
-  return `held for approval — nobody has been interrupted; release with 'dispatch thread approve ${threadId}'`;
+  return `this group is not approved yet — nobody has been interrupted; a person approves it with 'dispatch thread approve ${threadId}'`;
 }
 
-/** Whether this post may be typed into panes without a person releasing it.
+/** Whether posts in this thread may be typed into panes.
  *
- *  Only posts written by an agent are gated. A person running the command is
- *  the approval, and gating them would mean a human could not break into a
- *  thread that had stalled — which is the one escape hatch the hop limit
- *  depends on. */
+ *  Approval is a property of the group, granted once. Inside an approved group
+ *  agents talk freely, which is the whole point: a swarm keeping out of each
+ *  other's way cannot stop and ask about every message.
+ *
+ *  A person's own post always goes through, even into a group awaiting
+ *  approval. Gating it would break the hop limit's escape hatch, where only a
+ *  human post starts a fresh chain once a reply chain has been capped. */
 export function mayDeliver(
   meta: ThreadMeta,
-  opts: { fromAgent: boolean; mode: string },
+  opts: { fromAgent: boolean },
 ): boolean {
   if (!opts.fromAgent) return true;
-  if (meta.autoDeliver) return true;
-  return opts.mode === "auto";
+  return meta.approved !== false;
+}
+
+/** Whether a newly created group starts sanctioned.
+ *
+ *  Created by a person: yes, the act of creating it is the approval. Created
+ *  by an agent: only when the install has opted into unsupervised swarms. */
+export function approvedAtBirth(opts: { fromAgent: boolean; mode: string }): boolean {
+  return !opts.fromAgent || opts.mode === "auto";
+}
+
+/** Mark a group sanctioned. Appended like any other metadata change, so it
+ *  cannot lose a post racing with it. */
+export function approveThread(dir: string, id: string): ThreadMeta {
+  const t = readThread(dir, id);
+  if (!t) throw new Error(`No such thread: ${id}`);
+  const meta = { ...t.meta, approved: true };
+  appendFileSync(threadFile(dir, id), JSON.stringify({ meta }) + "\n");
+  return meta;
 }
 
 /** Posts a member should have seen and has not. This is the queue behind

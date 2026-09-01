@@ -19,6 +19,8 @@ import {
   deliveryText,
   heldForApproval,
   mayDeliver,
+  approvedAtBirth,
+  approveThread,
   isValidThreadId,
   listThreads,
   nextHops,
@@ -158,50 +160,69 @@ describe("the thread buffer", () => {
   });
 });
 
-describe("permission to interrupt another agent", () => {
-  // A pane write interrupts whatever that agent was mid-way through. An agent
-  // authorising its own interrupts is the wrong default, so by default it
-  // cannot: the post lands in the buffer and waits for a person.
-  const gated = (over: Partial<ThreadMeta> = {}): ThreadMeta => ({
+describe("permission to form a group", () => {
+  // The unit of permission is the group, not the message. Deciding who gets
+  // interrupted is the consequential act; approving each message inside a
+  // group you already sanctioned would make a swarm unusable, which is the
+  // case this is most useful for.
+  const group = (over: Partial<ThreadMeta> = {}): ThreadMeta => ({
     id: "t-g", topic: "", members: ["alpha", "bravo"], created: "",
     maxHops: 12, joinedAfter: {}, ...over,
   });
 
-  it("holds an agent's post by default", () => {
-    assert.equal(mayDeliver(gated(), { fromAgent: true, mode: "ask" }), false);
+  it("sanctions a group you started, because you started it", () => {
+    assert.equal(approvedAtBirth({ fromAgent: false, mode: "ask" }), true);
   });
 
-  it("never gates a person, so a human can always break into a stalled thread", () => {
+  it("holds a group an agent started on its own", () => {
+    assert.equal(approvedAtBirth({ fromAgent: true, mode: "ask" }), false);
+  });
+
+  it("lets agents form their own groups when the install opts in", () => {
+    // The swarm experiment: whether unsupervised coordination helps is worth
+    // measuring rather than assuming.
+    assert.equal(approvedAtBirth({ fromAgent: true, mode: "auto" }), true);
+  });
+
+  it("lets agents talk freely once the group is approved", () => {
+    // The point of per-group rather than per-post: after one nod, coordination
+    // runs at the speed of the work.
+    assert.equal(mayDeliver(group(), { fromAgent: true }), true);
+  });
+
+  it("writes to nobody while the group is still waiting", () => {
+    assert.equal(mayDeliver(group({ approved: false }), { fromAgent: true }), false);
+  });
+
+  it("never gates a person, even into a group awaiting approval", () => {
     // The hop limit's escape hatch depends on this: past the cap only a human
     // post starts a fresh chain, and a gated human post could not.
-    assert.equal(mayDeliver(gated(), { fromAgent: false, mode: "ask" }), true);
+    assert.equal(mayDeliver(group({ approved: false }), { fromAgent: false }), true);
   });
 
-  it("lets agents through when the whole install opts in", () => {
-    assert.equal(mayDeliver(gated(), { fromAgent: true, mode: "auto" }), true);
+  it("approving is one act that outlives the backlog", () => {
+    const dir = store();
+    createThread(dir, { members: ["alpha", "bravo"], id: "t-appr", approved: false });
+    assert.equal(readThread(dir, "t-appr")!.meta.approved, false);
+
+    approveThread(dir, "t-appr");
+    const t = readThread(dir, "t-appr")!;
+    assert.equal(t.meta.approved, true);
+    assert.equal(mayDeliver(t.meta, { fromAgent: true }), true,
+      "later posts flow without asking again");
   });
 
-  it("lets one thread opt in without loosening the default", () => {
-    // So unsupervised chatter can be measured against the gated default in
-    // the same session, rather than by flipping the install back and forth.
-    assert.equal(
-      mayDeliver(gated({ autoDeliver: true }), { fromAgent: true, mode: "ask" }),
-      true,
-    );
-  });
-
-  it("tells the sender nobody was woken, and how to release it", () => {
-    // The sender is an agent that would otherwise wait for a reply.
+  it("tells the sender nobody was woken, and what would change that", () => {
     const why = heldForApproval("t-4f2a");
     assert.match(why, /nobody has been interrupted/);
     assert.match(why, /dispatch thread approve t-4f2a/);
   });
 
   it("leaves a held post owed, so approving it can find it", () => {
-    // Held uses the same shape do-not-disturb does: recorded as missed, which
-    // is exactly what pendingFor looks for.
+    // Held reuses the shape do-not-disturb already had: recorded as a miss,
+    // which is exactly what pendingFor looks for.
     const dir = store();
-    createThread(dir, { members: ["alpha", "bravo"], id: "t-held" });
+    createThread(dir, { members: ["alpha", "bravo"], id: "t-held", approved: false });
     const p = post(dir, "t-held", "alpha", "can I touch session.ts?");
     recordDelivery(dir, "t-held", {
       post: p.id,
