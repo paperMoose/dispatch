@@ -511,6 +511,15 @@ function startFakeAgent(repo: string, id: string, config: Config): { wt: string;
   writeFileSync(
     receiver,
     [
+      // A real agent TUI puts its pty in raw mode. A shell leaves it canonical,
+      // and a canonical pty on macOS silently discards any line over 1024
+      // bytes — measured here 2026-08-31: 1020 arrives, 1030 does not, and the
+      // reader takes nothing after it either. A thread post carries the
+      // sender's text plus the reply instructions, so it clears 1024 easily.
+      // Without this the stand-in would fail where the thing it stands in for
+      // succeeds, which makes the test lie about dispatch rather than about the
+      // shell.
+      `stty -icanon min 1 time 0 2>/dev/null`,
       `printf 'Claude Code v9.9.9\\n? for shortcuts\\n'`,
       `while IFS= read -r line; do printf '<<%s>>\\n' "$line" >> '${received}'; done`,
       "",

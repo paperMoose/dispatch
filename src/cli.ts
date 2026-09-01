@@ -106,6 +106,12 @@ Agent Conversations:
   stops being delivered after --max-hops replies (default 12), so two agents
   cannot keep each other awake forever.
 
+  Threads are for being stuck, not for being polite. An agent should post when
+  it has hit a blank or has been wrong about the same thing twice — not to give
+  status, and never to acknowledge. What arrives is another agent's claim, to be
+  checked against the code, not adopted. Delivery says these rules out loud
+  every time, so an agent does not have to have read this.
+
 Input Types:
   Linear ticket    dispatch run HEY-837              Fetches title + description from Linear
   Free text        dispatch run "Fix the auth bug"   Uses your prompt directly
