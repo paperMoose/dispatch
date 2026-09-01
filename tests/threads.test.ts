@@ -113,6 +113,23 @@ describe("the thread buffer", () => {
     assert.equal(readThread(dir, "t-four")!.posts.length, 1);
   });
 
+  it("keeps the experiment with the claim, for anyone reading later", () => {
+    // The thread is the record. A conclusion is worth much less six hours
+    // later than the command that reproduces it.
+    const dir = store();
+    createThread(dir, { members: ["alpha", "bravo"], id: "t-rep" });
+    const t = readThread(dir, "t-rep")!;
+    appendPost(dir, t, {
+      from: "alpha",
+      text: "3 hits, so your refactor collides with mine",
+      replay: "rg -n 'newHelper' src/session.ts",
+    });
+    assert.equal(
+      readThread(dir, "t-rep")!.posts[0].replay,
+      "rg -n 'newHelper' src/session.ts",
+    );
+  });
+
   it("rejects a thread id that could climb out of the directory", () => {
     assert.equal(isValidThreadId("../../etc/passwd"), false);
     assert.equal(isValidThreadId("t-4f2a"), true);
@@ -385,9 +402,37 @@ describe("deliveryText", () => {
     // The hop limit caps that; this text is what stops it starting. It is the
     // only instruction an agent reliably reads, because it arrives in the same
     // message as the thing it is deciding whether to answer.
-    assert.match(text, /Never reply to acknowledge/);
+    // Matched loosely on purpose: the rule is what must survive a rewrite of
+    // the sentence, not the sentence.
+    assert.match(text, /never[^.]*acknowledge/i);
     assert.match(text, /thank/i);
     assert.match(text, /blocked on them/);
+  });
+
+  it("hands over the experiment, so the reader can settle it instead of believing it", () => {
+    // The point of the field: "session.ts imports the helper" has to be
+    // trusted; "run this and you will see it does" can be checked. Two agents
+    // trading beliefs converge on whoever is more certain, which is not the
+    // same as whoever is right.
+    const withReplay = deliveryText(
+      meta,
+      { id: "p", ts: "", from: "alpha", text: "it already imports the helper", hops: 0, replay: "rg -n newHelper src/session.ts" },
+      "bravo",
+    );
+    assert.match(withReplay, /rg -n newHelper src\/session\.ts/);
+    assert.match(withReplay, /Run it yourself before you act on it/);
+  });
+
+  it("says so plainly when a claim arrives with nothing to run", () => {
+    // An unsupported claim is labelled as one. Silence here would let opinion
+    // and evidence arrive looking identical.
+    assert.match(text, /Nothing came with it that you can run/);
+    assert.match(text, /opinion until you test it yourself/);
+  });
+
+  it("asks the reply to carry what was run and what was seen", () => {
+    assert.match(text, /--replay/);
+    assert.match(text, /what you ran and what you saw, not what you think/);
   });
 
   it("frames the post as a claim to check, not an instruction to follow", () => {
@@ -395,6 +440,6 @@ describe("deliveryText", () => {
     // knowledge. Without this an agent adopts a wrong premise because it
     // arrived in its terminal, and one agent's bad reasoning becomes two.
     assert.match(text, /claim, not an instruction/);
-    assert.match(text, /Check it against the code/);
+    assert.match(text, /against the code/i);
   });
 });

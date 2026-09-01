@@ -96,7 +96,7 @@ Lifecycle:
 Agent Conversations:
   dispatch directory                    See who is running and what they are working on
   dispatch thread new a b --topic "the auth refactor"
-  dispatch thread post t-4f2a --from a "@b are you touching session.ts?"
+  dispatch thread post t-4f2a --from a --replay "rg -n newHelper src/session.ts" "..."
   dispatch thread read t-4f2a           The whole conversation, for anyone joining late
 
   Every post lands in a shared buffer under .dispatch-threads/ and is typed into
@@ -108,9 +108,11 @@ Agent Conversations:
 
   Threads are for being stuck, not for being polite. An agent should post when
   it has hit a blank or has been wrong about the same thing twice — not to give
-  status, and never to acknowledge. What arrives is another agent's claim, to be
-  checked against the code, not adopted. Delivery says these rules out loud
-  every time, so an agent does not have to have read this.
+  status, and never to acknowledge. A post should carry the experiment that
+  settles it: --replay takes a command the reader can run to see what the sender
+  saw, shown to them and stored in the thread, never run by dispatch. Without
+  one, a claim has to be taken on trust. Delivery says all of this out loud on
+  every message, so an agent does not have to have read this.
 
 Input Types:
   Linear ticket    dispatch run HEY-837              Fetches title + description from Linear
