@@ -2927,8 +2927,28 @@ export function reachability(
     return { ok: false, why: "no live agent process — its pane is sitting at a shell", dnd: false };
   }
   const screen = tmuxCapture(id, 40);
-  if (!adapter.isReady(screen)) {
-    return { ok: false, why: `no ${adapter.bin} prompt is visible in its pane`, dnd: false };
+
+  // Busy counts as reachable, and this is the whole point of the feature.
+  //
+  // An agent mid-turn shows "Working (" or "esc to interrupt" and often no
+  // composer, so isReady alone reads it as unreachable — which is exactly
+  // backwards: an agent running a long test suite is precisely the one you
+  // need to reach before it collides with someone else. Requiring a painted
+  // prompt meant delivery only landed at an idle agent, and in practice
+  // agents are busy. Observed 2026-08-31: four straight undelivered posts to
+  // two agents running test suites back to back.
+  //
+  // Safe because the TUI composer queues typed text and submits it after the
+  // turn — which is what `dispatch send` has always relied on, warning rather
+  // than refusing. And busy is stronger evidence of life than a painted
+  // composer: a dead agent's composer lingers in scrollback, but "esc to
+  // interrupt" means something is actually running.
+  if (!adapter.isReady(screen) && !adapter.isBusy(screen)) {
+    return {
+      ok: false,
+      why: `no ${adapter.bin} prompt is visible in its pane, and nothing is running in it`,
+      dnd: false,
+    };
   }
   if (adapter.dismissStartupDialog(screen)) {
     return { ok: false, why: "waiting on a dialog — answer it with 'dispatch attach'", dnd: false };
