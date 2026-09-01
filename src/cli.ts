@@ -52,7 +52,7 @@ Commands:
   dispatch logs <id>                       Tail a headless agent's output
   dispatch send <id> "<msg>"               Post a message to a running interactive agent
   dispatch done "<what you did>"           Declare yourself finished (agents run this)
-  dispatch directory [--json]              Who is running, what they are on, who can be reached
+  dispatch directory [--json] [--all]      Who is running, what they are on, who can be reached
   dispatch thread new <id> <id> [--topic X] Start a shared buffer two or more agents confer in
   dispatch thread post <tid> --from <id> "<msg>"  Post to a thread; delivers to the other members
   dispatch thread read <tid>               Print the whole conversation
@@ -106,7 +106,8 @@ Finishing:
   outside. Resuming an agent clears the declaration.
 
 Agent Conversations:
-  dispatch directory                    See who is running and what they are working on
+  dispatch directory                    Agents in this repo, plus anyone you share a thread with
+  dispatch directory --all              Every live agent on the machine, across every repo
   dispatch thread new a b --topic "the auth refactor"
   dispatch thread post t-4f2a --from a --replay "rg -n newHelper src/session.ts" "..."
   dispatch thread read t-4f2a           The whole conversation, for anyone joining late

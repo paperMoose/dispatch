@@ -7,6 +7,7 @@ import {
   readdirSync,
 } from "fs";
 import { join } from "path";
+import { homedir } from "os";
 import { randomBytes } from "crypto";
 import { gitRoot } from "./shell.js";
 
@@ -125,8 +126,31 @@ export interface Thread {
   deliveries: DeliveryRecord[];
 }
 
+/** Where threads live: one place per machine, not one per repository.
+ *
+ *  A thread used to sit in the repo it was created from, which meant two
+ *  agents in different repositories could not share one at all — and a swarm
+ *  that spans repos is exactly when coordination matters most, because that is
+ *  when nobody can see the whole picture. Agents are a machine-level thing
+ *  anyway: they are workspaces on this machine, not rows in a repository.
+ *
+ *  Keyed by nothing: a thread names its members by agent id, and ids are
+ *  already unique per machine because they are multiplexer session names. */
 export function threadsDir(): string {
-  return join(gitRoot(), THREADS_DIR);
+  return join(homedir(), ".dispatch", "threads");
+}
+
+/** Threads created before they moved out of the repository.
+ *
+ *  Read, never written. A live conversation must not be orphaned by an
+ *  upgrade, so `listThreads` and `readThread` still find these; anything new
+ *  goes to the machine-wide directory. Returns nothing outside a repository. */
+export function legacyThreadsDir(): string | null {
+  try {
+    return join(gitRoot(), THREADS_DIR);
+  } catch {
+    return null;
+  }
 }
 
 function threadFile(dir: string, id: string): string {
@@ -187,7 +211,12 @@ export function createThread(
 }
 
 export function readThread(dir: string, id: string): Thread | null {
-  if (!threadExists(dir, id)) return null;
+  // A thread created before the move still answers to its id.
+  if (!threadExists(dir, id)) {
+    const legacy = legacyThreadsDir();
+    if (legacy && legacy !== dir && threadExists(legacy, id)) return readThread(legacy, id);
+    return null;
+  }
   const lines = readFileSync(threadFile(dir, id), "utf-8")
     .split("\n")
     .filter((l) => l.trim());
@@ -266,12 +295,21 @@ export function addMembers(dir: string, id: string, members: string[]): string[]
 }
 
 export function listThreads(dir: string): Thread[] {
-  if (!existsSync(dir)) return [];
   const out: Thread[] = [];
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith(".jsonl")) continue;
-    const t = readThread(dir, f.replace(/\.jsonl$/, ""));
-    if (t) out.push(t);
+  const seen = new Set<string>();
+  const legacy = legacyThreadsDir();
+  for (const d of legacy && legacy !== dir ? [dir, legacy] : [dir]) {
+    if (!existsSync(d)) continue;
+    for (const f of readdirSync(d)) {
+      if (!f.endsWith(".jsonl")) continue;
+      const id = f.replace(/\.jsonl$/, "");
+      if (seen.has(id)) continue;
+      const t = readThread(d, id);
+      if (t) {
+        seen.add(id);
+        out.push(t);
+      }
+    }
   }
   return out.sort((a, b) => b.meta.created.localeCompare(a.meta.created));
 }
