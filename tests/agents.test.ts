@@ -778,3 +778,44 @@ describe("parser accuracy against real transcript shapes", () => {
     assert.equal(codex.dismissStartupDialog(painted), null);
   });
 });
+
+describe("the trust-this-folder dialog", () => {
+  // Every claude agent launched into a fresh worktree meets this, and the
+  // default option is the destructive one. On 2026-08-31 a whole evening of
+  // agents sat on it: alive to every process check, never given their prompt,
+  // and reported by the orchestrator as "running".
+  const claude = getAdapter("claude");
+
+  const ARROW_MENU = [
+    " Quick safety check: Is this a project you created or one you trust?",
+    " Claude Code'll be able to read, edit, and execute files here.",
+    " Security guide",
+    " ❯ No, exit",
+    "   Yes, I trust this folder",
+    " Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+  it("answers the arrow-key menu current builds render", () => {
+    // There is no digit to type here, which is exactly what the old numbered
+    // matcher assumed.
+    assert.equal(claude.dismissStartupDialog(ARROW_MENU), "key:down enter");
+  });
+
+  it("moves off the default before confirming", () => {
+    // "No, exit" is selected when the dialog opens. Confirming without moving
+    // would kill the agent rather than start it.
+    const keys = claude.dismissStartupDialog(ARROW_MENU)!;
+    assert.ok(keys.startsWith("key:"), "sent as keys, not typed as text");
+    assert.deepEqual(keys.slice(4).split(" "), ["down", "enter"]);
+  });
+
+  it("still answers the older numbered form", () => {
+    const numbered = "Do you trust the files in this folder?\n 1. Yes, proceed\n 2. No, exit";
+    assert.equal(claude.dismissStartupDialog(numbered), "1");
+  });
+
+  it("says nothing when no dialog is on screen", () => {
+    assert.equal(claude.dismissStartupDialog("Claude Code v9.9.9\n? for shortcuts"), null);
+  });
+});
+

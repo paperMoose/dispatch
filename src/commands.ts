@@ -1140,8 +1140,14 @@ export function cmdSend(args: string[], config: Config): void {
   const screen = tmuxCapture(id, 40);
 
   // The process check cannot identify the pane on cmux, so require the TUI to
-  // actually be painted before typing anything into it.
-  if (!adapter.isReady(screen)) {
+  // actually be painted before typing anything into it — unless the pane could
+  // not be read at all, which is a different thing from an empty one. See
+  // reachability(): an unreadable capture used to block every send on this
+  // machine even though the agent was plainly alive.
+  const unreadable = !screen.trim();
+  if (unreadable) {
+    log.warn(`Could not read ${id}'s screen; sending on the strength of its live ${adapter.bin} process.`);
+  } else if (!adapter.isReady(screen) && !adapter.isBusy(screen)) {
     log.error(`No ${adapter.bin} prompt is visible in ${id}, so nothing was sent.`);
     log.dim(`  Check it first: dispatch attach ${id}`);
     process.exit(1);
@@ -1149,7 +1155,7 @@ export function cmdSend(args: string[], config: Config): void {
 
   // A modal dialog swallows typed text and reads Enter as answering it, so a
   // message here would silently confirm a permission or trust prompt instead.
-  if (adapter.dismissStartupDialog(screen)) {
+  if (!unreadable && adapter.dismissStartupDialog(screen)) {
     log.error(`${adapter.bin} is waiting on a dialog in ${id}, so nothing was sent.`);
     log.dim(`  Answer it first: dispatch attach ${id}`);
     process.exit(1);
@@ -2955,6 +2961,22 @@ export function reachability(
     return { ok: false, why: "no live agent process — its pane is sitting at a shell", dnd: false };
   }
   const screen = tmuxCapture(id, 40);
+
+  // A screen we could not read is not a screen with nothing on it.
+  //
+  // Under cmux the capture goes through getCmuxWorkspaceId, which returns null
+  // when the worktree marker is missing and no workspace title exactly matches
+  // the agent id — and tmuxCapture then returns "". Treating that as "no TUI"
+  // reported `nothing is running in it` for nine agents whose processes were
+  // provably alive, and it blocked `dispatch send` the same way, which is why
+  // an orchestrator could not steer anything for an entire evening.
+  //
+  // agentProcessAlive already passed to get here: a process named claude or
+  // codex is sitting in this worktree, and a bare shell is not named either of
+  // those. That is the evidence; an unreadable pane does not withdraw it.
+  if (!screen.trim()) {
+    return { ok: true, why: "", dnd: false };
+  }
 
   // Busy counts as reachable, and this is the whole point of the feature.
   //
