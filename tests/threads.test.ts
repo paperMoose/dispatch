@@ -17,6 +17,8 @@ import {
   catchUpText,
   createThread,
   deliveryText,
+  heldForApproval,
+  mayDeliver,
   isValidThreadId,
   listThreads,
   nextHops,
@@ -153,6 +155,64 @@ describe("the thread buffer", () => {
     createThread(dir, { members: ["bravo"], id: "t-new" });
     const ids = listThreads(dir).map((t) => t.meta.id);
     assert.deepEqual(ids.sort(), ["t-new", "t-old"]);
+  });
+});
+
+describe("permission to interrupt another agent", () => {
+  // A pane write interrupts whatever that agent was mid-way through. An agent
+  // authorising its own interrupts is the wrong default, so by default it
+  // cannot: the post lands in the buffer and waits for a person.
+  const gated = (over: Partial<ThreadMeta> = {}): ThreadMeta => ({
+    id: "t-g", topic: "", members: ["alpha", "bravo"], created: "",
+    maxHops: 12, joinedAfter: {}, ...over,
+  });
+
+  it("holds an agent's post by default", () => {
+    assert.equal(mayDeliver(gated(), { fromAgent: true, mode: "ask" }), false);
+  });
+
+  it("never gates a person, so a human can always break into a stalled thread", () => {
+    // The hop limit's escape hatch depends on this: past the cap only a human
+    // post starts a fresh chain, and a gated human post could not.
+    assert.equal(mayDeliver(gated(), { fromAgent: false, mode: "ask" }), true);
+  });
+
+  it("lets agents through when the whole install opts in", () => {
+    assert.equal(mayDeliver(gated(), { fromAgent: true, mode: "auto" }), true);
+  });
+
+  it("lets one thread opt in without loosening the default", () => {
+    // So unsupervised chatter can be measured against the gated default in
+    // the same session, rather than by flipping the install back and forth.
+    assert.equal(
+      mayDeliver(gated({ autoDeliver: true }), { fromAgent: true, mode: "ask" }),
+      true,
+    );
+  });
+
+  it("tells the sender nobody was woken, and how to release it", () => {
+    // The sender is an agent that would otherwise wait for a reply.
+    const why = heldForApproval("t-4f2a");
+    assert.match(why, /nobody has been interrupted/);
+    assert.match(why, /dispatch thread approve t-4f2a/);
+  });
+
+  it("leaves a held post owed, so approving it can find it", () => {
+    // Held uses the same shape do-not-disturb does: recorded as missed, which
+    // is exactly what pendingFor looks for.
+    const dir = store();
+    createThread(dir, { members: ["alpha", "bravo"], id: "t-held" });
+    const p = post(dir, "t-held", "alpha", "can I touch session.ts?");
+    recordDelivery(dir, "t-held", {
+      post: p.id,
+      delivered: [],
+      undelivered: [{ id: "bravo", why: heldForApproval("t-held") }],
+    });
+
+    assert.deepEqual(
+      pendingFor(readThread(dir, "t-held")!, "bravo").map((x) => x.text),
+      ["can I touch session.ts?"],
+    );
   });
 });
 

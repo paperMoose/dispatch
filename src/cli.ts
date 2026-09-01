@@ -56,6 +56,8 @@ Commands:
   dispatch thread read <tid>               Print the whole conversation
   dispatch thread add <tid> <id>...        Add agents to an existing thread
   dispatch thread list                     Show all threads
+  dispatch thread pending                  Posts held for your approval
+  dispatch thread approve <tid>            Release held posts into the panes
   dispatch dnd <id> on|off [--reason X]    Hold thread posts for an agent that must not be interrupted
   dispatch stop <id>                       Send Ctrl-C and kill the tmux window
   dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
@@ -106,6 +108,11 @@ Agent Conversations:
   stops being delivered after --max-hops replies (default 12), so two agents
   cannot keep each other awake forever.
 
+  An agent's post is held until you run 'dispatch thread approve' — writing into
+  a working agent's pane interrupts it, so agents do not authorise their own
+  interrupts. Your own posts always go straight through. Setting thread_delivery
+  to auto, or 'thread new --auto', lifts the gate when you want them to run free.
+
   Threads are for being stuck, not for being polite. An agent should post when
   it has hit a blank or has been wrong about the same thing twice — not to give
   status, and never to acknowledge. A post should carry the experiment that
@@ -147,6 +154,8 @@ Environment:
   DISPATCH_CODEX_MODEL   Default model when --agent codex (default: codex's own)
   DISPATCH_REASONING_EFFORT  Codex reasoning effort (default: codex's own)
   DISPATCH_PERMISSION_MODE  Permission mode for agents (default: dontAsk; "" for prompts)
+  DISPATCH_THREAD_DELIVERY  ask (default) or auto — whether an agent may
+                            interrupt another agent without you releasing it
   DISPATCH_CONFIG        Config file path (default: ~/.dispatch.yml)
 
 Config (~/.dispatch.yml):
@@ -156,6 +165,7 @@ Config (~/.dispatch.yml):
   codex_model: gpt-5.6-sol  # Model when agent is codex
   reasoning_effort: xhigh   # Codex reasoning depth
   permission_mode: dontAsk  # Agents don't stop for permission prompts
+  thread_delivery: ask    # Hold agent-to-agent posts until you approve them
   max_turns: 20           # Default max turns for headless
   agent_timeout: 30       # Seconds to wait for the agent TUI to start
   worktree_dir: .worktrees  # Where worktrees are created`);

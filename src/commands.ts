@@ -83,6 +83,8 @@ import {
   catchUpText,
   pendingFor,
   parseMentions,
+  mayDeliver,
+  heldForApproval,
   threadExists,
   threadsDir,
   isValidThreadId,
@@ -2120,7 +2122,14 @@ dispatch thread list
 dispatch dnd hey-838 on --reason "mid-migration"      # hold posts for it
 dispatch dnd hey-838 off                              # everything it missed is delivered now
 dispatch dnd                                          # who is currently on do-not-disturb
+
+dispatch thread pending                               # what is waiting on your approval
+dispatch thread approve t-4f2a                        # release it into the recipients' panes
 \`\`\`
+
+**By default an agent cannot interrupt another agent on its own authority.** A pane write lands mid-turn in whatever that agent was doing, so agent-written posts are held: the post goes into the buffer, nobody is woken, you get a notification, and \`dispatch thread pending\` shows what is waiting. Your own posts are never gated — that is what keeps a human able to break into a stalled thread.
+
+Set \`thread_delivery: auto\` in \`~/.dispatch.yml\` (or \`DISPATCH_THREAD_DELIVERY=auto\`) to let agents through everywhere, or \`dispatch thread new a b --auto\` to open one unsupervised thread while everything else stays gated — which is how to measure whether unsupervised chatter actually helps.
 
 **Inside an agent, \`--from\` is optional** — run from your own worktree, dispatch knows who you are. Same for \`dispatch dnd on\`, which is how an agent protects a stretch of careful work.
 
@@ -3021,6 +3030,9 @@ export function cmdThread(args: string[], config: Config): void {
     const topic = take("--topic") || "";
     const idOverride = take("--id");
     const maxHopsArg = take("--max-hops");
+    // Opt one thread out of the approval gate, so unsupervised agent chatter
+    // can be measured against the default without loosening the default.
+    const autoDeliver = rest.includes("--auto");
     const members = rest.filter((a) => !a.startsWith("--"));
     if (members.length < 1) {
       log.error('Usage: dispatch thread new <agent-id> [<agent-id>...] [--topic "..."]');
@@ -3041,7 +3053,7 @@ export function cmdThread(args: string[], config: Config): void {
       process.exit(1);
     }
 
-    const meta = createThread(dir, { members, topic, id: idOverride, maxHops });
+    const meta = createThread(dir, { members, topic, id: idOverride, maxHops, autoDeliver });
     log.ok(`Thread ${fmt.BOLD}${meta.id}${fmt.NC} created`);
     log.dim(`  members: ${meta.members.join(", ")}`);
     if (meta.topic) log.dim(`  topic: ${meta.topic}`);
@@ -3051,6 +3063,11 @@ export function cmdThread(args: string[], config: Config): void {
     for (const m of meta.members) {
       const r = reachability(m, config);
       if (!r.ok) log.warn(`  ${m}: ${r.why}`);
+    }
+    if (meta.autoDeliver) {
+      log.warn("  --auto: agents in this thread interrupt each other without asking you");
+    } else if (config.threadDelivery !== "auto") {
+      log.dim("  agent posts are held until you run: dispatch thread approve " + meta.id);
     }
     log.dim(`  post:    dispatch thread post ${meta.id} --from <you> "message"`);
     return;
@@ -3096,12 +3113,40 @@ export function cmdThread(args: string[], config: Config): void {
     const mentioned = parseMentions(text).filter((m) => t.meta.members.includes(m));
     const post = appendPost(dir, t, { from, text, to: mentioned, replay });
 
-    const { delivered, undelivered } = deliverPost(t.meta, post, liveDelivery(config));
+    // Whether an agent may interrupt other agents on its own authority. The
+    // caller's worktree decides, not the --from it typed: a person running the
+    // command is the approval, and an agent cannot promote itself by claiming
+    // to be one.
+    const fromAgent = !!callerId(config);
+    const allowed = mayDeliver(t.meta, { fromAgent, mode: config.threadDelivery });
+
+    let delivered: string[] = [];
+    let undelivered: { id: string; why: string }[] = [];
+    if (allowed) {
+      ({ delivered, undelivered } = deliverPost(t.meta, post, liveDelivery(config)));
+    } else {
+      // Held, not dropped. The post is already in the buffer; recording every
+      // recipient as missed is what makes `thread approve` able to find it,
+      // and is the same shape do-not-disturb uses.
+      const why = heldForApproval(id);
+      undelivered = recipientsFor(t.meta, post.from, post.to).map((r) => ({ id: r, why }));
+      // The whole point of gating is that it does not happen behind your back.
+      if (undelivered.length) {
+        notify(
+          `${from} wants to reach ${undelivered.map((u) => u.id).join(", ")}`,
+          `${text.slice(0, 120)}\n\nRelease: dispatch thread approve ${id}`,
+        );
+      }
+    }
     // Recorded whatever happened, including "nobody": that is what tells a
     // returning agent this post is still owed to it.
     recordDelivery(dir, id, { post: post.id, delivered, undelivered });
 
     log.ok(`Posted to ${fmt.BOLD}${id}${fmt.NC} as ${from}`);
+    if (!allowed) {
+      log.warn(`  Held for approval — no pane was written to.`);
+      log.dim(`  A person releases it with: dispatch thread approve ${id}`);
+    }
     if (mentioned.length) log.dim(`  addressed: ${mentioned.join(", ")}`);
     if (replay) log.dim(`  replay: ${replay}`);
     else if (from !== "human") {
@@ -3157,6 +3202,65 @@ export function cmdThread(args: string[], config: Config): void {
     return;
   }
 
+  if (sub === "approve") {
+    const id = rest[0];
+    if (!id || !threadExists(dir, id)) {
+      log.error(`No such thread: ${id || "(none given)"}`);
+      log.dim("  What is waiting: dispatch thread pending");
+      process.exit(1);
+    }
+    const t = readThread(dir, id)!;
+    const deps = liveDelivery(config);
+    let sent = 0;
+    for (const member of t.meta.members) {
+      for (const p of pendingFor(t, member)) {
+        // Delivered one post at a time, in the ordinary delivery form: an
+        // approved post is a normal post that waited, not a digest.
+        const r = deps.reach(member);
+        if (!r.ok) {
+          recordDelivery(dir, id, { post: p.id, delivered: [], undelivered: [{ id: member, why: r.why }] });
+          log.warn(`  ${member}: ${r.why}`);
+          continue;
+        }
+        try {
+          deps.write(member, deliveryText(t.meta, p, member));
+          recordDelivery(dir, id, { post: p.id, delivered: [member], undelivered: [] });
+          sent++;
+        } catch (e) {
+          recordDelivery(dir, id, { post: p.id, delivered: [], undelivered: [{ id: member, why: String(e) }] });
+          log.warn(`  ${member}: ${String(e)}`);
+        }
+      }
+    }
+    if (sent) log.ok(`Released ${sent} message${sent === 1 ? "" : "s"} in ${fmt.BOLD}${id}${fmt.NC}`);
+    else log.info(`Nothing was waiting in ${id}`);
+    return;
+  }
+
+  if (sub === "pending") {
+    // What is waiting on you, across every thread. The answer to "has anything
+    // been trying to reach an agent while I was not looking".
+    let any = false;
+    for (const t of listThreads(dir)) {
+      const waiting = new Map<string, ThreadPost[]>();
+      for (const m of t.meta.members) {
+        const ps = pendingFor(t, m);
+        if (ps.length) waiting.set(m, ps);
+      }
+      if (!waiting.size) continue;
+      any = true;
+      console.log(`${fmt.BOLD}${t.meta.id}${fmt.NC}${t.meta.topic ? `  ${fmt.DIM}${t.meta.topic}${fmt.NC}` : ""}`);
+      for (const [m, ps] of waiting) {
+        for (const p of ps) {
+          console.log(`  ${fmt.DIM}→${fmt.NC} ${m}  ${fmt.DIM}from ${p.from}:${fmt.NC} ${p.text.split("\n")[0].slice(0, 70)}`);
+        }
+      }
+      log.dim(`  release: dispatch thread approve ${t.meta.id}`);
+    }
+    if (!any) log.info("Nothing is waiting for approval");
+    return;
+  }
+
   if (sub === "list" || !sub) {
     const all = listThreads(dir);
     if (!all.length) {
@@ -3176,7 +3280,7 @@ export function cmdThread(args: string[], config: Config): void {
   }
 
   log.error(`Unknown thread command: ${sub}`);
-  log.dim("  new | post | read | add | list");
+  log.dim("  new | post | read | add | list | pending | approve");
   process.exit(1);
 }
 

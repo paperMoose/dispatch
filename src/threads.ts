@@ -93,6 +93,10 @@ export interface ThreadMeta {
    *  count is exact, where two clock readings in the same millisecond are not
    *  ordered at all. */
   joinedAfter: Record<string, number>;
+  /** This thread delivers agent posts without waiting for a person, whatever
+   *  the global setting. Set with `thread new --auto`, so one experiment can
+   *  run unsupervised while everything else stays gated. */
+  autoDeliver?: boolean;
 }
 
 /** What a post actually reached. `undelivered` covers every reason a member's
@@ -142,7 +146,13 @@ export function threadExists(dir: string, id: string): boolean {
  *  table, and an agent handed only the id can reconstruct the membership. */
 export function createThread(
   dir: string,
-  opts: { members: string[]; topic?: string; id?: string; maxHops?: number },
+  opts: {
+    members: string[];
+    topic?: string;
+    id?: string;
+    maxHops?: number;
+    autoDeliver?: boolean;
+  },
 ): ThreadMeta {
   const id = opts.id || `t-${randomBytes(3).toString("hex")}`;
   if (!isValidThreadId(id)) throw new Error(`Invalid thread id: ${id}`);
@@ -159,6 +169,7 @@ export function createThread(
     created,
     maxHops: opts.maxHops ?? DEFAULT_MAX_HOPS,
     joinedAfter: Object.fromEntries(members.map((m) => [m, 0])),
+    ...(opts.autoDeliver ? { autoDeliver: true } : {}),
   };
   writeFileSync(threadFile(dir, id), JSON.stringify({ meta }) + "\n", {
     mode: 0o600,
@@ -283,6 +294,28 @@ export function nextHops(t: Thread, from: string): number {
     if (reached.has(t.posts[i].id)) return t.posts[i].hops + 1;
   }
   return 0;
+}
+
+/** Why a post was not typed into a pane, when a person has not released it.
+ *  Stored verbatim in the delivery record and shown to the sender, so an agent
+ *  waiting for an answer learns that nobody has been woken yet. */
+export function heldForApproval(threadId: string): string {
+  return `held for approval — nobody has been interrupted; release with 'dispatch thread approve ${threadId}'`;
+}
+
+/** Whether this post may be typed into panes without a person releasing it.
+ *
+ *  Only posts written by an agent are gated. A person running the command is
+ *  the approval, and gating them would mean a human could not break into a
+ *  thread that had stalled — which is the one escape hatch the hop limit
+ *  depends on. */
+export function mayDeliver(
+  meta: ThreadMeta,
+  opts: { fromAgent: boolean; mode: string },
+): boolean {
+  if (!opts.fromAgent) return true;
+  if (meta.autoDeliver) return true;
+  return opts.mode === "auto";
 }
 
 /** Posts a member should have seen and has not. This is the queue behind
