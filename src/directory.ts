@@ -23,6 +23,63 @@ import { join, relative, sep } from "path";
  *  and would therefore clear a flag stored there. */
 export const DND_MARKER = ".dispatch-dnd";
 
+/** An agent's own declaration that it has finished.
+ *
+ *  Everything else dispatch knows about "done" is inferred — a quiet pane, no
+ *  child processes, a branch that stopped moving — and every one of those is
+ *  also what a long test run looks like. Inference cannot tell "finished and
+ *  reported" from "thinking hard", which is why an orchestrator watching seven
+ *  agents could not say which were waiting on it.
+ *
+ *  So the agent says so. A file in its own worktree, for the same reasons
+ *  do-not-disturb is one: it needs no id, races nothing, and goes away with
+ *  the worktree. The history event is the audit trail; this is the fast read,
+ *  and it survives history being trimmed at 500 entries. */
+export const DONE_MARKER = ".dispatch-done";
+
+export interface Done {
+  at: string;
+  summary: string;
+  pr: string;
+  /** What the agent left for a person: the sentence an orchestrator most
+   *  needs and can least reconstruct from a diff. */
+  handoff: string;
+}
+
+export function readDone(wtPath: string): Done | null {
+  try {
+    const raw = readFileSync(join(wtPath, DONE_MARKER), "utf-8").trim();
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    return {
+      at: p.at || "",
+      summary: p.summary || "",
+      pr: p.pr || "",
+      handoff: p.handoff || "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function setDone(wtPath: string, d: Omit<Done, "at">): Done {
+  const done: Done = { at: new Date().toISOString(), ...d };
+  writeFileSync(join(wtPath, DONE_MARKER), JSON.stringify(done) + "\n", { mode: 0o600 });
+  return done;
+}
+
+/** Cleared on resume: an agent picked back up is working again, and a stale
+ *  declaration would tell the orchestrator to stop watching it. */
+export function clearDone(wtPath: string): boolean {
+  const was = readDone(wtPath) !== null;
+  try {
+    unlinkSync(join(wtPath, DONE_MARKER));
+  } catch {
+    // Already gone.
+  }
+  return was;
+}
+
 export interface Dnd {
   since: string;
   reason: string;
@@ -118,6 +175,12 @@ function firstLine(raw: string | undefined): string {
 export interface DirectoryEntry {
   id: string;
   branch: string;
+  /** What the agent is doing, with `done` coming from its own declaration
+   *  rather than from guessing at a quiet pane. `working` and `idle` remain
+   *  inferred and remain unreliable — that is exactly why `done` is not. */
+  state: "done" | "working" | "idle" | "exited";
+  /** Set when state is "done". */
+  done?: { at: string; summary: string; pr: string; handoff: string };
   /** running: the agent CLI has live children. idle: the window is there and
    *  nothing is running in it. exited: the pane's process is gone. */
   status: "running" | "idle" | "exited";
@@ -146,20 +209,32 @@ export function directoryJson(entries: DirectoryEntry[]): string {
  *  lining up the moment an id is long, which is most of them. */
 export function formatDirectory(
   entries: DirectoryEntry[],
-  fmt: { BOLD: string; DIM: string; GREEN: string; YELLOW: string; RED: string; NC: string },
+  fmt: { BOLD: string; DIM: string; GREEN: string; YELLOW: string; RED: string; BLUE: string; NC: string },
 ): string {
   if (!entries.length) {
     return "No agents are running. Launch one with: dispatch run <ticket|prompt>";
   }
   const out: string[] = [];
   for (const e of entries) {
+    // Done is its own mark, because "has this one finished" is the question an
+    // orchestrator asks most and the one it could previously only guess at.
     const dot =
-      e.status === "running"
-        ? `${fmt.GREEN}●${fmt.NC}`
-        : e.status === "idle"
-          ? `${fmt.YELLOW}●${fmt.NC}`
-          : `${fmt.RED}●${fmt.NC}`;
-    out.push(`${dot} ${fmt.BOLD}${e.id}${fmt.NC}  ${fmt.DIM}${e.branch}${fmt.NC}`);
+      e.state === "done"
+        ? `${fmt.BLUE}✓${fmt.NC}`
+        : e.state === "working"
+          ? `${fmt.GREEN}●${fmt.NC}`
+          : e.state === "idle"
+            ? `${fmt.YELLOW}●${fmt.NC}`
+            : `${fmt.RED}●${fmt.NC}`;
+    out.push(
+      `${dot} ${fmt.BOLD}${e.id}${fmt.NC}  ${fmt.DIM}${e.branch}${fmt.NC}` +
+        (e.state === "done" ? `  ${fmt.BLUE}done${fmt.NC}` : ""),
+    );
+    if (e.done) {
+      if (e.done.summary) out.push(`    did:     ${e.done.summary.split("\n")[0]}`);
+      if (e.done.handoff) out.push(`    left:    ${e.done.handoff.split("\n")[0]}`);
+      if (e.done.pr) out.push(`    pr:      ${e.done.pr}`);
+    }
     out.push(
       `    reach:   ${e.reachable ? "yes" : `no — ${e.unreachable || "unknown"}`}`,
     );

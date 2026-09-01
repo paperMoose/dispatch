@@ -10,6 +10,10 @@ import { tmpdir } from "node:os";
 
 import {
   DND_MARKER,
+  DONE_MARKER,
+  readDone,
+  setDone,
+  clearDone,
   agentIdFromPath,
   clearDnd,
   describeWork,
@@ -20,7 +24,7 @@ import {
   type DirectoryEntry,
 } from "../src/directory.js";
 
-const PLAIN = { BOLD: "", DIM: "", GREEN: "", YELLOW: "", RED: "", NC: "" };
+const PLAIN = { BOLD: "", DIM: "", GREEN: "", YELLOW: "", RED: "", BLUE: "", NC: "" };
 
 function worktree(): string {
   return mkdtempSync(join(tmpdir(), "dispatch-dnd-"));
@@ -65,6 +69,54 @@ describe("do-not-disturb", () => {
     assert.equal(clearDnd(wt), true);
     assert.equal(readDnd(wt), null);
     assert.equal(clearDnd(wt), false, "clearing twice is not an error");
+  });
+});
+
+describe("an agent declaring it is finished", () => {
+  // The one signal an orchestrator can trust. A quiet pane, no child process,
+  // a branch that stopped moving — every one of those is also what a long test
+  // run looks like, which is why watching seven agents it could not say which
+  // were waiting on it.
+  it("is absent until the agent says so", () => {
+    assert.equal(readDone(worktree()), null);
+  });
+
+  it("carries what it did, what is left, and the PR", () => {
+    const wt = worktree();
+    setDone(wt, {
+      summary: "rewrote the IVR detector",
+      handoff: "someone has to pick a threshold",
+      pr: "https://github.com/x/y/pull/1",
+    });
+    const d = readDone(wt)!;
+    assert.equal(d.summary, "rewrote the IVR detector");
+    assert.equal(d.handoff, "someone has to pick a threshold");
+    assert.equal(d.pr, "https://github.com/x/y/pull/1");
+    assert.ok(d.at, "and when, so a stale one is visible");
+  });
+
+  it("lives in the agent's own worktree, so it needs no id and races nothing", () => {
+    const wt = worktree();
+    setDone(wt, { summary: "x", handoff: "", pr: "" });
+    assert.ok(existsSync(join(wt, DONE_MARKER)));
+  });
+
+  it("is cleared when the agent is resumed", () => {
+    // A resumed agent is working again; a stale declaration would tell the
+    // orchestrator to stop watching the one thing that just started moving.
+    const wt = worktree();
+    setDone(wt, { summary: "x", handoff: "", pr: "" });
+    assert.equal(clearDone(wt), true);
+    assert.equal(readDone(wt), null);
+    assert.equal(clearDone(wt), false, "clearing twice is not an error");
+  });
+
+  it("reads a corrupt marker as not-done rather than claiming success", () => {
+    // Failing this direction is the safe one: an agent wrongly reported done
+    // stops being watched, which is how work gets silently dropped.
+    const wt = worktree();
+    writeFileSync(join(wt, DONE_MARKER), "{not json");
+    assert.equal(readDone(wt), null);
   });
 });
 
@@ -139,6 +191,7 @@ describe("the directory an agent reads", () => {
     {
       id: "hey-837",
       branch: "hey-837",
+      state: "working",
       status: "running",
       reachable: true,
       dnd: false,
@@ -150,6 +203,8 @@ describe("the directory an agent reads", () => {
     {
       id: "hey-838",
       branch: "hey-838-rate-limit",
+      state: "done",
+      done: { at: "2026-08-31T22:00:00Z", summary: "added rate limiting", handoff: "pick the limit", pr: "" },
       status: "idle",
       reachable: false,
       unreachable: "do not disturb: mid-migration — held in the buffer",

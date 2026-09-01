@@ -28,6 +28,7 @@ import {
   cmdThread,
   cmdDirectory,
   cmdDnd,
+  cmdDone,
 } from "./commands.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -50,6 +51,7 @@ Commands:
   dispatch status <id>                     Structured summary: turns, files, commits, last actions
   dispatch logs <id>                       Tail a headless agent's output
   dispatch send <id> "<msg>"               Post a message to a running interactive agent
+  dispatch done "<what you did>"           Declare yourself finished (agents run this)
   dispatch directory [--json]              Who is running, what they are on, who can be reached
   dispatch thread new <id> <id> [--topic X] Start a shared buffer two or more agents confer in
   dispatch thread post <tid> --from <id> "<msg>"  Post to a thread; delivers to the other members
@@ -94,6 +96,14 @@ Lifecycle:
   4. stop   — Interrupt the agent (worktree and branch preserved)
   5. resume — Pick up where it left off (claude --continue / codex resume)
   6. cleanup — Remove worktree when done (--delete-branch to also delete the branch)
+
+Finishing:
+  An agent runs `dispatch done "what I did" --handoff "what is left"` when it is
+  past its own review. Every dispatched brief ends with that instruction, so it
+  does not depend on your CLAUDE.md being current. `dispatch directory` then
+  shows it as done rather than leaving you to guess from a quiet pane — a
+  finished agent and one mid-way through a long test run look identical from
+  outside. Resuming an agent clears the declaration.
 
 Agent Conversations:
   dispatch directory                    See who is running and what they are working on
@@ -242,6 +252,9 @@ async function main(): Promise<void> {
       break;
     case "dnd":
       cmdDnd(rest, config);
+      break;
+    case "done":
+      cmdDone(rest, config);
       break;
     case "history":
       cmdHistory(rest);
