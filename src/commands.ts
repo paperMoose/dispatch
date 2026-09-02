@@ -97,6 +97,7 @@ import {
   type ThreadMeta,
   type ThreadPost,
 } from "./threads.js";
+import { collectInbox, inboxBody, claudeHookJson, deliveredIds } from "./inbox.js";
 import { readTurnState, type TurnState } from "./turnstate.js";
 import { recordAgent, readRegistry } from "./registry.js";
 import {
@@ -3148,6 +3149,10 @@ Subcommands:
   read <tid>              Print the whole conversation
   add <tid> <id>...       Add agents to an existing group
   list                    All groups, newest first
+  inbox [<id>] [--hook <event>]
+                          What you are owed, for an agent to run at its own turn
+                          boundary. Silent when nothing is waiting. --hook emits
+                          the JSON a Claude Code hook uses to add context.
   pending                 Groups an agent started, waiting on you
   approve <tid>           Sanction a group; its members then talk freely
 
@@ -3407,6 +3412,41 @@ export function cmdThread(args: string[], config: Config): void {
     return;
   }
 
+  if (sub === "inbox") {
+    // The pull half of delivery: an agent asks, at its own turn boundary, what
+    // it is owed. Nothing is typed into any pane, so none of the machinery
+    // that made pushing hard applies — no readiness guess, no byte cap, no
+    // flattening of newlines, no interrupting a turn in progress.
+    //
+    // Deliberately silent when there is nothing owed: this runs on every turn,
+    // and a hook that prints on every turn is a hook that gets turned off.
+    const hookEvent = take("--hook");
+    const me = rest.find((a) => !a.startsWith("--")) || callerId(config);
+    if (!me) {
+      log.error("Not inside an agent worktree, and no agent id given.");
+      log.dim("  Usage: dispatch thread inbox [<agent-id>] [--hook <event>]");
+      process.exit(1);
+    }
+
+    // Do-not-disturb holds delivery without losing it: nothing is emitted and
+    // nothing is recorded, so every post stays owed until the agent lifts it.
+    if (readDnd(worktreePath(me, config))) return;
+
+    const items = collectInbox(listThreads(dir), me);
+    const body = inboxBody(items, me);
+    if (!body) return;
+
+    process.stdout.write(hookEvent ? claudeHookJson(hookEvent, body) : body + "\n");
+
+    // Recorded only after the write has gone out. The other order loses a
+    // message for good if this process dies mid-flight, and a message that
+    // silently never arrives is the worst failure this system has.
+    for (const { thread, post } of deliveredIds(items)) {
+      recordDelivery(dir, thread, { post, delivered: [me], undelivered: [] });
+    }
+    return;
+  }
+
   if (sub === "pending") {
     // What is waiting on you, across every thread. The answer to "has an agent
     // been trying to start a conversation while I was not looking".
@@ -3464,7 +3504,7 @@ export function cmdThread(args: string[], config: Config): void {
   }
 
   log.error(`Unknown thread command: ${sub}`);
-  log.dim("  new | post | read | add | list | pending | approve");
+  log.dim("  new | post | read | add | list | inbox | pending | approve");
   process.exit(1);
 }
 

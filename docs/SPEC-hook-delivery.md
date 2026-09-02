@@ -1,0 +1,191 @@
+# SPEC: hook-based thread delivery
+
+Status: draft, pre-measurement
+Owner: Ryan
+Written: 2026-09-02
+
+## The problem in one paragraph
+
+Thread posts are delivered by typing into a running agent's TUI. That single
+choice is the origin of the readiness regex, the transcript-tailing turn
+detector, the trust-dialog handling, the 2,500-byte cap, the newline
+flattening, and a three second sleep per recipient. This spec replaces the
+transport with a pull: dispatch writes the post and stops; the agent fetches it
+at its own turn boundary via a hook the agent runtime already supports.
+
+## Goal
+
+A post reaches its recipients' context with newlines intact, at a turn
+boundary, without dispatch typing anything into a pane, on all four
+multiplexer x runtime combinations.
+
+## Non-goals
+
+Explicitly out of scope. Touching any of these means stopping and asking first.
+
+- The thread data model. `.jsonl` layout, `ThreadPost`, `ThreadMeta`,
+  `recipientsFor`, `nextHops`, hop limits and the approval queue are unchanged.
+- The directory, `dispatch done`, DND semantics, the agent registry.
+- `turnstate.ts`. It stays until a cell is proven, then is deleted per cell,
+  not before.
+- Any rewrite of `dispatch send`. Threads only.
+- npm publish. No release until every gate below is green.
+
+## Decisions already made
+
+Locked. Reopening one requires saying so explicitly.
+
+| # | Decision | Choice |
+|---|---|---|
+| D1 | Push or pull | Pull. Agent fetches at its own turn boundary. |
+| D2 | Agents that cannot run hooks | Keep pane-typing as fallback. Nothing goes dark. |
+| D3 | Which hook event | Turn end (`Stop`). Not `UserPromptSubmit`: a dispatched agent may never be prompted again. |
+| D4 | Where the etiquette lives | Installed once at launch. Posts carry only the post. |
+| D5 | How far to take backend extensibility | A real plugin system, so a third party can add a multiplexer dispatch does not ship. |
+
+On D5: I recommended the narrower option (extract the seam internally, mirroring
+the existing `AgentAdapter`, and document it without publishing an API). Ryan
+chose the full plugin system. Recorded here so the scope is deliberate rather
+than drifted into. It still needs its own spec: what a plugin may override, how
+it is discovered and loaded, and what happens when one misbehaves. **Do not
+start D5 from this document.**
+
+## Constraint discovered before writing this
+
+Codex runs hooks **synchronously and blocks until they return**. cmux hit a
+~35 second launch hang from a synchronous hook and moved to fire-and-forget
+(source: comments in `cmux-codex-wrapper`). Whatever the hook runs must be fast
+enough to be invisible once per turn, or Codex agents stall on every turn.
+
+This is what Gate 0 measures.
+
+## Gate 0: latency, thresholds registered before measuring
+
+The hook must spawn a process, read the thread file, and emit JSON. The
+question is whether that can be the existing Node `dispatch` binary or whether
+it needs a shell shim.
+
+Measured: p50 and p99 wall clock, cold, over >= 20 runs, at thread sizes of
+1, 100 and 1,000 posts.
+
+| Result | Verdict |
+|---|---|
+| p99 <= 200ms | Node `dispatch` binary is the hook. Proceed as designed. |
+| 200ms < p99 <= 1s | Node is too slow for Codex. Hook becomes a shell shim reading the `.jsonl` directly; the Node CLI stays the human-facing path. |
+| p99 > 1s | Pull model does not work for Codex as specified. Stop and redesign that cell before writing code. |
+
+Claude's hooks are also synchronous but fire once per turn against a local
+file; the same numbers apply and the same thresholds govern.
+
+**No code is written until this number exists and is recorded below.**
+
+## The matrix
+
+Every cell ships with a passing live test or it does not ship.
+
+| | Claude | Codex |
+|---|---|---|
+| **cmux** | hooks injected by cmux PATH shim | hooks injected by cmux PATH shim |
+| **tmux** | `.claude/settings.json` in the worktree | `--enable hooks -c hooks.<event>=...` per invocation |
+
+Current live coverage: cmux + Codex only. The other three are unverified.
+
+## Interface
+
+New command. Must NOT be called `pending`: `dispatch thread pending` already
+means "groups awaiting your approval" and is human-facing.
+
+```
+dispatch thread inbox            # posts owed to the agent whose worktree this is
+```
+
+- Resolves its own identity from cwd via `agentIdFromPath`. No id argument.
+- Emits the runtime's context-injection JSON on stdout.
+- Exits 0 and emits nothing when there is nothing owed. A hook that fires on
+  every turn must be silent when idle.
+- Records delivery via the existing `recordDelivery`, so `pendingFor` stops
+  returning the post. Delivery accounting does not change shape.
+- Respects DND by emitting nothing.
+
+## Verification
+
+Three layers. Each must exist before the next is trusted.
+
+**1. Unit.** Existing 319 tests keep passing untouched. `pendingFor`,
+`recipientsFor`, hop limits: no change.
+
+**2. Hook contract test.** Runs the hook directly, no agent, no pane. Asserts:
+well-formed JSON for the runtime, silence when nothing is owed, DND honoured,
+and **wall clock inside the Gate 0 budget**. The latency constraint is an
+assertion, not a hope. Runs in CI.
+
+**3. Live loop-back, one per cell.** The only proof that counts.
+
+> Post a message containing a random nonce plus an instruction to post that
+> nonce back. Assert the nonce appears in the thread file within a timeout.
+
+One assertion covers the whole chain: hook fired, message arrived intact, agent
+read it, reply path worked. Identical in all four cells, so it is one harness
+parameterized by config. Model it on `tests/integration-tmux.test.ts`, which
+already clears `CMUX_WORKSPACE_ID` and `CMUX_SOCKET_PATH` to force the tmux
+backend against real panes.
+
+**Red-on-revert is mandatory.** Each cell's test must fail when the delivery
+code is reverted. A green suite against a gutted transport is what let the
+duplicate-delivery bug ship. Demonstrate the red before claiming the green.
+
+## Order of work
+
+1. ~~Gate 0 measurement.~~ **Done.** Band 1, result recorded below.
+2. ~~`dispatch thread inbox` plus its contract test.~~ **Done.** `src/inbox.ts`,
+   `tests/inbox.test.ts` (19 tests), wired as a `thread` subcommand. Full suite
+   338 passing. Four mutations verified to turn the new tests red; one of them
+   exposed a test that was asserting a guarantee `pendingFor` already made
+   rather than the membership check it claimed to cover, and that test was
+   rewritten to the case that binds.
+3. Hook installation for the cell that is cheapest to prove, with its
+   loop-back test.
+4. Remaining three cells, one at a time, each with its own loop-back test.
+5. Only once all four are green: delete the compensating machinery
+   (readiness regex, `turnstate.ts`, the byte cap, the sleeps).
+6. Ship.
+
+Pane-typing stays in place as the fallback throughout. It is removed from no
+cell until that cell's loop-back test is green.
+
+## Stop-and-ask triggers
+
+- Gate 0 lands in the third band.
+- Any cell needs a mechanism not listed in the matrix.
+- The fix for a failing cell would change the thread data model.
+- Scope grows past the file list: `threads.ts`, `commands.ts`, `shell.ts`,
+  a new hook module, and tests.
+
+## Gate 0 result
+
+Measured 2026-09-02, macOS, 25 cold runs each.
+
+| What | p50 | p99 |
+|---|---|---|
+| process spawn floor (`/usr/bin/true`) | 1.6ms | 3.2ms |
+| node boot floor (`node -e ''`) | 20.4ms | 22.6ms |
+| `dispatch --version` (full CLI boot) | 38.4ms | 49.8ms |
+| hook: parse + compute owed + emit, 1 post | 27.6ms | 29.9ms |
+| hook: same, 100 posts | 27.9ms | 30.2ms |
+| hook: same, 1,000 posts | 30.0ms | 32.5ms |
+
+**Verdict: band 1. p99 <= 200ms with roughly 4x margin.** The Node `dispatch`
+binary can be the hook. No shell shim needed.
+
+Two things worth keeping:
+
+- Cost is dominated by Node boot, not the thread. Going from 1 post to 1,000
+  adds 2.6ms. Thread size is not a scaling risk; process startup is the whole
+  bill.
+- Even the heavy path (full CLI boot at 49.8ms p99, plus ~10ms of work) stays
+  under 60ms, once per turn. Invisible against Codex's synchronous hook
+  execution, and nowhere near the ~35s hang cmux hit.
+
+The contract test asserts a **200ms p99 budget**. That is 4x current headroom,
+so it catches a real regression (a network call, a sync spawn, loading the
+whole agent registry) without failing on normal machine noise.
