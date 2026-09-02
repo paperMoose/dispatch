@@ -1,6 +1,6 @@
 # SPEC: hook-based thread delivery
 
-Status: draft, pre-measurement
+Status: in progress. Gate 0 passed, Claude path proven end to end, Codex outstanding.
 Owner: Ryan
 Written: 2026-09-02
 
@@ -16,8 +16,8 @@ at its own turn boundary via a hook the agent runtime already supports.
 ## Goal
 
 A post reaches its recipients' context with newlines intact, at a turn
-boundary, without dispatch typing anything into a pane, on all four
-multiplexer x runtime combinations.
+boundary, without dispatch typing anything into a pane, on every agent runtime
+dispatch launches.
 
 ## Non-goals
 
@@ -26,8 +26,7 @@ Explicitly out of scope. Touching any of these means stopping and asking first.
 - The thread data model. `.jsonl` layout, `ThreadPost`, `ThreadMeta`,
   `recipientsFor`, `nextHops`, hop limits and the approval queue are unchanged.
 - The directory, `dispatch done`, DND semantics, the agent registry.
-- `turnstate.ts`. It stays until a cell is proven, then is deleted per cell,
-  not before.
+- `turnstate.ts`. It stays until every runtime is proven, then goes, not before.
 - Any rewrite of `dispatch send`. Threads only.
 - npm publish. No release until every gate below is green.
 
@@ -134,10 +133,9 @@ assertion, not a hope. Runs in CI.
 > nonce back. Assert the nonce appears in the thread file within a timeout.
 
 One assertion covers the whole chain: hook fired, message arrived intact, agent
-read it, reply path worked. Identical in all four cells, so it is one harness
-parameterized by config. Model it on `tests/integration-tmux.test.ts`, which
-already clears `CMUX_WORKSPACE_ID` and `CMUX_SOCKET_PATH` to force the tmux
-backend against real panes.
+read it, reply path worked. Identical per runtime, so it is one harness
+parameterized by runtime. It needs no multiplexer at all, which the walkthrough
+below established by passing in a bare shell.
 
 **Red-on-revert is mandatory.** Each cell's test must fail when the delivery
 code is reverted. A green suite against a gutted transport is what let the
@@ -152,16 +150,16 @@ duplicate-delivery bug ship. Demonstrate the red before claiming the green.
    exposed a test that was asserting a guarantee `pendingFor` already made
    rather than the membership check it claimed to cover, and that test was
    rewritten to the case that binds.
-3. ~~Hook installation for the cheapest cell, with its loop-back test.~~ **Claude cell done** (walkthrough above). Codex cell outstanding.
-   ~~Was: hook installation for the cell that is cheapest to prove, with its
-   loop-back test.~~
-4. Remaining three cells, one at a time, each with its own loop-back test.
-5. Only once all four are green: delete the compensating machinery
+3. ~~Hook installation for the cheapest runtime, with its loop-back test.~~
+   **Done for Claude** (walkthrough below).
+4. Codex: find the event and output shape that inject context, then its own
+   loop-back test. Nothing about it is known yet.
+5. Only once both runtimes are green: delete the compensating machinery
    (readiness regex, `turnstate.ts`, the byte cap, the sleeps).
 6. Ship.
 
-Pane-typing stays in place as the fallback throughout. It is removed from no
-cell until that cell's loop-back test is green.
+Pane-typing stays in place as the fallback throughout. It is removed for no
+runtime until that runtime's loop-back test is green.
 
 ## Stop-and-ask triggers
 
