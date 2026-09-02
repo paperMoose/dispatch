@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  claudeHookJson,
+  hookJson,
   collectInbox,
   deliveredIds,
   inboxBody,
@@ -147,6 +147,18 @@ describe("how it reads once injected", () => {
     assert.ok(out.includes("reply 5 of 12"), out);
   });
 
+  it("puts no placeholder inside the command it tells the agent to run", () => {
+    // A live Codex run copied `--replay "cmd"` straight out of an earlier
+    // version of this text and posted `replay: cmd`. A replay command nobody
+    // can run is worse than no replay, because it is offered as evidence.
+    // Whatever the agent has to substitute stays off the copyable line.
+    const out = inboxBody([{ meta: meta(), posts: [post()] }], "bob");
+    const cmdLine = out.split("\n").find((l) => l.includes("dispatch thread post"))!;
+    assert.ok(cmdLine, "the reply command should be on its own line");
+    assert.ok(!cmdLine.includes("--replay"), `placeholder is back on the command line: ${cmdLine}`);
+    assert.ok(!/"cmd"|<[a-z ]+>/.test(cmdLine), `copyable placeholder in: ${cmdLine}`);
+  });
+
   it("stays far shorter than the lecture it replaces", () => {
     // The old deliveryText was 1,206 characters of fixed etiquette per post,
     // roughly half the 2,500-byte pane budget, re-read on every delivery. The
@@ -158,20 +170,33 @@ describe("how it reads once injected", () => {
 });
 
 describe("the hook envelope", () => {
-  it("is the shape a Claude Code hook uses to add context", () => {
-    // Matches the live UserPromptSubmit hook on this machine, which is how we
-    // know the shape is right rather than plausible.
-    const parsed = JSON.parse(claudeHookJson("Stop", "you have mail"));
-    assert.equal(parsed.hookSpecificOutput.hookEventName, "Stop");
-    assert.equal(parsed.hookSpecificOutput.additionalContext, "you have mail");
+  it("is one shape both runtimes accept", () => {
+    // Not what we expected going in. Claude's Stop hook also takes
+    // hookSpecificOutput.additionalContext, but Codex's stop.command.output
+    // schema sets additionalProperties:false and defines no Stop variant of
+    // it, so that shape is rejected there. decision/block/reason is accepted
+    // by both, and both were confirmed live against a nonce.
+    const parsed = JSON.parse(hookJson("you have mail"));
+    assert.equal(parsed.decision, "block");
+    assert.equal(parsed.reason, "you have mail");
+  });
+
+  it("carries no field Codex would reject", () => {
+    // additionalProperties:false means one stray key drops the whole message.
+    const allowed = new Set([
+      "continue", "decision", "reason", "stopReason", "suppressOutput", "systemMessage",
+    ]);
+    for (const k of Object.keys(JSON.parse(hookJson("x")))) {
+      assert.ok(allowed.has(k), `${k} is not in Codex's stop.command.output schema`);
+    }
   });
 
   it("survives quotes and newlines in a post", () => {
     // A post is agent-authored text going through a JSON envelope into another
     // agent's context. Anything that breaks the envelope drops the message.
     const nasty = 'he said "it\'s broken"\nthen: {"json": true}\\';
-    const parsed = JSON.parse(claudeHookJson("Stop", nasty));
-    assert.equal(parsed.hookSpecificOutput.additionalContext, nasty);
+    const parsed = JSON.parse(hookJson(nasty));
+    assert.equal(parsed.reason, nasty);
   });
 });
 
@@ -223,7 +248,7 @@ describe("the latency budget the design depends on", () => {
     const items: InboxItem[] = [{ meta: meta(), posts }];
     const t0 = performance.now();
     const body = inboxBody(items, "bob");
-    claudeHookJson("Stop", body);
+    hookJson(body);
     const ms = performance.now() - t0;
     assert.ok(ms < 200, `rendering took ${ms.toFixed(1)}ms`);
   });

@@ -61,28 +61,37 @@ export function inboxBody(items: InboxItem[], recipient: string): string {
     const body = item.posts.map((p) => renderPost(item.meta, p, recipient)).join("\n");
     const others = item.meta.members.filter((m) => m !== recipient);
     const hops = Math.max(...item.posts.map((p) => p.hops)) + 1;
+    // The reply command is shown ready to run, with no placeholder inside it.
+    // A live Codex run copied an earlier version's `--replay "cmd"` verbatim
+    // and posted `replay: cmd` — a command nobody can run, offered as
+    // evidence, which is worse than offering none. Anything the agent must
+    // substitute now sits outside the line it is meant to copy.
     return (
       `${head}\n${body}\n` +
       `  also here: ${others.length ? others.join(", ") : "(nobody else yet)"}\n` +
-      `  reply only if you have what they need or are blocked on them: ` +
-      `dispatch thread post ${item.meta.id} --replay "cmd" "what you saw"` +
-      ` (reply ${hops} of ${item.meta.maxHops})`
+      `  reply only if you have what they need or are blocked on them ` +
+      `(reply ${hops} of ${item.meta.maxHops}):\n` +
+      `    dispatch thread post ${item.meta.id} "what you found"\n` +
+      `  add --replay with the command you actually ran, so they can check it themselves`
     );
   });
   return blocks.join("\n\n");
 }
 
-/** The JSON a Claude Code hook prints to put text into the agent's context.
+/** The JSON a turn-end hook prints to put text into the agent's context.
  *
- *  Shape confirmed against a hook that is live on this machine: the
- *  `UserPromptSubmit` hook at ~/.claude/hooks/inject-datetime.sh emits exactly
- *  this and its text lands in the session. The event name is a parameter
- *  rather than a constant because which event we hang delivery on is settled
- *  per runtime by a live test, not by assumption. */
-export function claudeHookJson(event: string, context: string): string {
-  return JSON.stringify({
-    hookSpecificOutput: { hookEventName: event, additionalContext: context },
-  });
+ *  One shape for both runtimes, which is not what we expected going in.
+ *  Claude's `Stop` hook also accepts `hookSpecificOutput.additionalContext`,
+ *  but Codex's `stop.command.output` schema sets `additionalProperties: false`
+ *  and defines no `StopHookSpecificOutputWire`, so that shape is rejected
+ *  there outright. `decision: block` with a `reason` is accepted by both, and
+ *  both were confirmed live: each emitted a nonce that existed nowhere except
+ *  inside this envelope.
+ *
+ *  It is also the more honest verb. "Block" means do not stop yet, and a
+ *  message that arrived is precisely a reason not to stop. */
+export function hookJson(context: string): string {
+  return JSON.stringify({ decision: "block", reason: context });
 }
 
 /** Which posts to mark delivered, given what was actually rendered.

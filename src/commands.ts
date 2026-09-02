@@ -97,7 +97,7 @@ import {
   type ThreadMeta,
   type ThreadPost,
 } from "./threads.js";
-import { collectInbox, inboxBody, claudeHookJson, deliveredIds } from "./inbox.js";
+import { collectInbox, inboxBody, hookJson, deliveredIds } from "./inbox.js";
 import { readTurnState, type TurnState } from "./turnstate.js";
 import { recordAgent, readRegistry } from "./registry.js";
 import {
@@ -3149,10 +3149,10 @@ Subcommands:
   read <tid>              Print the whole conversation
   add <tid> <id>...       Add agents to an existing group
   list                    All groups, newest first
-  inbox [<id>] [--hook <event>]
-                          What you are owed, for an agent to run at its own turn
+  inbox [<id>] [--hook]   What you are owed, for an agent to run at its own turn
                           boundary. Silent when nothing is waiting. --hook emits
-                          the JSON a Claude Code hook uses to add context.
+                          the JSON a turn-end hook uses to add context; the same
+                          shape works for Claude and Codex.
   pending                 Groups an agent started, waiting on you
   approve <tid>           Sanction a group; its members then talk freely
 
@@ -3420,11 +3420,11 @@ export function cmdThread(args: string[], config: Config): void {
     //
     // Deliberately silent when there is nothing owed: this runs on every turn,
     // and a hook that prints on every turn is a hook that gets turned off.
-    const hookEvent = take("--hook");
+    const asHook = rest.includes("--hook");
     const me = rest.find((a) => !a.startsWith("--")) || callerId(config);
     if (!me) {
       log.error("Not inside an agent worktree, and no agent id given.");
-      log.dim("  Usage: dispatch thread inbox [<agent-id>] [--hook <event>]");
+      log.dim("  Usage: dispatch thread inbox [<agent-id>] [--hook]");
       process.exit(1);
     }
 
@@ -3436,7 +3436,7 @@ export function cmdThread(args: string[], config: Config): void {
     const body = inboxBody(items, me);
     if (!body) return;
 
-    process.stdout.write(hookEvent ? claudeHookJson(hookEvent, body) : body + "\n");
+    process.stdout.write(asHook ? hookJson(body) : body + "\n");
 
     // Recorded only after the write has gone out. The other order loses a
     // message for good if this process dies mid-flight, and a message that

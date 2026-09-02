@@ -1,6 +1,7 @@
 # SPEC: hook-based thread delivery
 
-Status: in progress. Gate 0 passed, Claude path proven end to end, Codex outstanding.
+Status: in progress. Gate 0 passed. Both runtimes proven end to end. Next is
+installing the hook at launch and removing the compensating machinery.
 Owner: Ryan
 Written: 2026-09-02
 
@@ -92,8 +93,8 @@ So the axis that matters is the runtime, not the terminal:
 
 | Runtime | Mechanism | Status |
 |---|---|---|
-| Claude | `Stop` hook, `hookSpecificOutput.additionalContext` | **Proven end to end.** See walkthrough. |
-| Codex | `--enable hooks -c hooks.<event>=...` per invocation | Unverified. Event name and output shape both unknown. |
+| Claude | `Stop` hook, `.claude/settings.json` | **Proven end to end.** See walkthrough. |
+| Codex | `--enable hooks -c hooks.Stop=...` per invocation | **Proven end to end.** Same envelope. |
 
 The multiplexer only re-enters for the pane-typing fallback, which is unchanged
 and already works on both. This removes two of the four planned live tests.
@@ -152,8 +153,9 @@ duplicate-delivery bug ship. Demonstrate the red before claiming the green.
    rewritten to the case that binds.
 3. ~~Hook installation for the cheapest runtime, with its loop-back test.~~
    **Done for Claude** (walkthrough below).
-4. Codex: find the event and output shape that inject context, then its own
-   loop-back test. Nothing about it is known yet.
+4. ~~Codex: find the event and output shape that inject context, then its own
+   loop-back test.~~ **Done.** Same `Stop` event, same envelope, live loop-back
+   passed twice.
 5. Only once both runtimes are green: delete the compensating machinery
    (readiness regex, `turnstate.ts`, the byte cap, the sleeps).
 6. Ship.
@@ -240,3 +242,47 @@ Two things worth keeping:
 The contract test asserts a **200ms p99 budget**. That is 4x current headroom,
 so it catches a real regression (a network call, a sync spawn, loading the
 whole agent registry) without failing on normal machine noise.
+
+## Walkthrough: Codex, proven end to end
+
+Run 2026-09-02 in a real worktree, `codex exec` with the hook passed per
+invocation. The trace, twice:
+
+```
+codex -> STARTED
+hook: Stop -> Blocked          <- the inbox returned decision:block
+codex -> dispatch thread post t-cxprobe "144" --replay "python3 -c 'print(12*12)'"
+         Posted to t-cxprobe as cx-probe
+codex -> 144
+hook: Stop -> Completed        <- second fire, silent, agent stops
+```
+
+### One envelope, not two
+
+Expected two formats and found one. Claude's `Stop` accepts
+`hookSpecificOutput.additionalContext` (confirmed live), but Codex's
+`stop.command.output` schema sets `additionalProperties: false` and defines no
+`StopHookSpecificOutputWire`, so that shape is rejected there outright. Its
+accepted keys are `continue`, `decision`, `reason`, `stopReason`,
+`suppressOutput`, `systemMessage`.
+
+`{"decision":"block","reason":...}` is accepted by both, and each was confirmed
+live against a nonce that existed nowhere but inside the envelope. So there is
+one `hookJson`, no per-runtime branching, and a test asserts the payload carries
+no key outside Codex's allow-list.
+
+### A wording bug only a live run could find
+
+The first Codex run copied the placeholder out of the suggested reply command
+and posted `replay: cmd` — a command nobody can run, offered as evidence, which
+is worse than offering none. The framing now keeps every placeholder off the
+line the agent is meant to copy. The rerun posted
+`replay: python3 -c 'print(12*12)'`, a command that genuinely reproduces the
+answer. Regression-tested.
+
+### A confound worth recording
+
+The first Codex attempt hung with the hook never firing. Cause: `codex` on PATH
+is a cmux shim that injects its own `-c hooks.Stop=...`, which collided with the
+one under test. `CMUX_CODEX_HOOKS_DISABLED=1` bypasses it. Any future Codex hook
+test needs that, or it is measuring cmux rather than dispatch.
