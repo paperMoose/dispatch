@@ -81,14 +81,23 @@ file; the same numbers apply and the same thresholds govern.
 
 ## The matrix
 
-Every cell ships with a passing live test or it does not ship.
+**Revised after the end-to-end walkthrough on 2026-09-02. It is not a 2x2.**
 
-| | Claude | Codex |
+The pull path never touches a multiplexer. The hook runs inside the agent's own
+process, reads a file, and writes stdout; identity comes from cwd and
+do-not-disturb from a file in the worktree. Nothing in that chain knows or
+cares whether the agent is in tmux, in cmux, or in a bare shell. The live
+loop-back below was run in a plain shell with no multiplexer at all and passed.
+
+So the axis that matters is the runtime, not the terminal:
+
+| Runtime | Mechanism | Status |
 |---|---|---|
-| **cmux** | hooks injected by cmux PATH shim | hooks injected by cmux PATH shim |
-| **tmux** | `.claude/settings.json` in the worktree | `--enable hooks -c hooks.<event>=...` per invocation |
+| Claude | `Stop` hook, `hookSpecificOutput.additionalContext` | **Proven end to end.** See walkthrough. |
+| Codex | `--enable hooks -c hooks.<event>=...` per invocation | Unverified. Event name and output shape both unknown. |
 
-Current live coverage: cmux + Codex only. The other three are unverified.
+The multiplexer only re-enters for the pane-typing fallback, which is unchanged
+and already works on both. This removes two of the four planned live tests.
 
 ## Interface
 
@@ -143,8 +152,9 @@ duplicate-delivery bug ship. Demonstrate the red before claiming the green.
    exposed a test that was asserting a guarantee `pendingFor` already made
    rather than the membership check it claimed to cover, and that test was
    rewritten to the case that binds.
-3. Hook installation for the cell that is cheapest to prove, with its
-   loop-back test.
+3. ~~Hook installation for the cheapest cell, with its loop-back test.~~ **Claude cell done** (walkthrough above). Codex cell outstanding.
+   ~~Was: hook installation for the cell that is cheapest to prove, with its
+   loop-back test.~~
 4. Remaining three cells, one at a time, each with its own loop-back test.
 5. Only once all four are green: delete the compensating machinery
    (readiness regex, `turnstate.ts`, the byte cap, the sleeps).
@@ -160,6 +170,49 @@ cell until that cell's loop-back test is green.
 - The fix for a failing cell would change the thread data model.
 - Scope grows past the file list: `threads.ts`, `commands.ts`, `shell.ts`,
   a new hook module, and tests.
+
+## Walkthrough: the Claude path, proven end to end
+
+Run 2026-09-02 in a real git worktree at `.worktrees/e2e-probe`, no multiplexer.
+
+Seeded a thread with a post from `orchestrator` addressed to `e2e-probe`, marked
+undelivered. Installed a `Stop` hook running `dispatch thread inbox --hook Stop`.
+Ran `claude -p "Reply with the single word STARTED and nothing else."` The agent
+answered the prompt, the hook fired, and the buffer afterwards read:
+
+```
+META  members=['orchestrator', 'e2e-probe']
+POST  ep1       orchestrator -> ['e2e-probe']  hops=0   "What is 7 times 6? ..."
+DELIV ep1       delivered=[]            undelivered=['e2e-probe']   <- seeded
+DELIV ep1       delivered=['e2e-probe'] undelivered=[]              <- the hook
+POST  15ed7b97  e2e-probe    -> (all)   hops=1   "42"
+DELIV 15ed7b97  delivered=[] undelivered=['orchestrator']
+```
+
+What that establishes, each of which was an assumption before:
+
+- A `Stop` hook fires at the end of a turn.
+- `hookSpecificOutput.additionalContext` on a `Stop` hook reaches the model. A
+  separate isolated probe confirmed this first: the model emitted a nonce that
+  existed only inside the hook's output.
+- The agent resolved its own id from cwd. The reply is attributed to
+  `e2e-probe` and no id was typed anywhere.
+- The agent understood the post and the reply command well enough to answer
+  correctly and post back, from framing alone, with no etiquette preamble.
+- Hop counting survives the new path: the reply is `hops=1`.
+- Delivery is recorded after emission, and the reply to an offline member stays
+  owed rather than being dropped.
+
+### Why this does not loop
+
+A `Stop` hook that always injects would never let an agent stop. Nothing
+guards against that explicitly, and nothing needs to: the hook records delivery
+after emitting, so the next `Stop` finds an empty inbox and emits nothing. The
+silence-when-empty rule is the loop brake, not a bolted-on counter.
+
+The one way that breaks is if `recordDelivery` fails while emission succeeds,
+which would re-inject the same post forever. Worth a guard before this is
+enabled by default.
 
 ## Gate 0 result
 
