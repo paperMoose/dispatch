@@ -43,15 +43,15 @@ function help(): void {
   console.log(`dispatch — Launch coding agents in isolated git worktrees
 
 Each agent gets its own branch and worktree, so it can make changes without
-affecting your working tree or other agents. Agents run inside tmux — use
-interactive mode to watch and guide them, or headless for fire-and-forget.
+affecting your working tree or other agents. Use interactive mode for a visible
+pane, invisible for a real session kept off-screen, or headless for a one-shot run.
 Agents run on Claude Code by default, or Codex with --agent codex.
 
 Commands:
   dispatch run <ticket|prompt> [options]   Launch an agent
   dispatch list                            Show all running agents with status
   dispatch status <id>                     Structured summary: turns, files, commits, last actions
-  dispatch logs <id>                       Tail a headless agent's output
+  dispatch logs <id>                       Show an agent's output
   dispatch send <id> "<msg>"               Post a message to a running interactive agent
   dispatch done "<what you did>"           Declare yourself finished (agents run this)
   dispatch directory [--json] [--all]      Who is running, what they are on, who can be reached
@@ -63,7 +63,7 @@ Commands:
   dispatch thread pending                  Groups an agent started, waiting on you
   dispatch thread approve <tid>            Sanction a group; its members then talk freely
   dispatch dnd <id> on|off [--reason X]    Hold thread posts for an agent that must not be interrupted
-  dispatch stop <id>                       Send Ctrl-C and kill the tmux window
+  dispatch stop <id>                       Stop an agent session
   dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
   dispatch cleanup --all [--delete-branch] Remove all worktrees
@@ -72,12 +72,13 @@ Commands:
                                            Remove worktrees whose cmux tab has been closed
   dispatch history [N]                     Show past agent runs (default: last 20)
   dispatch find <query>                    Search across all agent terminal content
-  dispatch attach [id]                     Open tmux session (or jump to specific agent)
+  dispatch attach <id>                     Open an interactive or invisible session
   dispatch schedule <sub>                  Manage scheduled runs (launchd, macOS only)
   dispatch setup                           Add dispatch docs to ~/.claude/CLAUDE.md
 
 Run Options:
   --headless, -H            Fire-and-forget mode (no interactive terminal)
+  --invisible               Native session kept off-screen; attach later (Claude only)
   --agent, -A <runtime>     Agent CLI to drive: claude, codex (default: claude)
   --effort <level>          Codex reasoning: low|medium|high|xhigh|max|ultra
   --model, -m <model>       Model to run. Selects the runtime when the name
@@ -92,7 +93,7 @@ Run Options:
   --ask                     Re-enable permission prompts (off by default)
 
 Lifecycle:
-  1. run    — Creates worktree + branch, opens tmux window, starts the agent CLI
+  1. run    — Creates worktree + branch and starts the requested launch mode
   2. work   — Agent reads codebase, makes changes, commits, pushes, creates PRs
   3. attach — View/interact with the agent (auto-opens terminal tab if no TTY)
   4. stop   — Interrupt the agent (worktree and branch preserved)
@@ -145,6 +146,7 @@ Input Types:
 Examples:
   dispatch run HEY-837                                  # Interactive, from Linear ticket
   dispatch run HEY-837 --headless                       # Background — check with: dispatch logs HEY-837
+  dispatch run HEY-837 --invisible                      # Real off-screen Claude session; attach later
   dispatch run HEY-837 HEY-838 HEY-839                 # Batch launch 3 agents in parallel
   dispatch run "Fix the auth bug" --name HEY-879        # Free text with custom branch name
   dispatch run HEY-837 -m sonnet --max-turns 20         # Sonnet model, 20 turn limit
@@ -158,7 +160,7 @@ Examples:
 Tips:
   - Each agent works on its own branch — avoid dispatching two agents to the same files
   - Use --name to get meaningful branch names (e.g., --name HEY-879 creates branch hey-879)
-  - Interactive mode lets you guide the agent; headless is for well-defined tasks
+  - Invisible mode avoids tab clutter but remains attachable; headless exits after one run
   - Works from inside Claude Code sessions (agents launch in separate terminals)
   - Use dispatch list to check status: green = running, yellow = idle, red = exited
 
@@ -230,7 +232,7 @@ async function main(): Promise<void> {
       cmdDashboard(config);
       break;
     case "attach":
-      cmdAttach(rest);
+      cmdAttach(rest, config);
       break;
     case "setup":
       cmdSetup();

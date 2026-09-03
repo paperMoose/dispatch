@@ -20,6 +20,10 @@ import { homedir } from "os";
 import { basename, join } from "path";
 import { codexHookArgs, installClaudeHook } from "./turnhook.js";
 import { modelFlag, permissionModeFlag, type Config } from "./config.js";
+import {
+  claudeInvisibleRuntime,
+  type InvisibleRuntime,
+} from "./runner.js";
 
 export type BuiltInAgentKind = "claude" | "codex";
 export type AgentKind = string;
@@ -117,7 +121,7 @@ export interface AgentLogSummary {
   lastText: string;
 }
 
-export type RunMode = "interactive" | "headless";
+export type RunMode = "interactive" | "headless" | "invisible";
 
 export interface AgentAdapter {
   kind: string;
@@ -129,8 +133,8 @@ export interface AgentAdapter {
    *  between runtimes, so each reads its own. */
   modelKey: "model" | "codexModel";
 
-  /** Launch line used for headless runs. `mode: "interactive"` returns the
-   *  bare launch line without a prompt attached. */
+  /** Launch line for any run mode. `mode: "interactive"` returns the bare
+   *  launch line without a prompt attached; the other modes consume it. */
   runCmd(
     prompt: string,
     mode: RunMode,
@@ -162,8 +166,12 @@ export interface AgentAdapter {
     env?: { hookTrustAlreadyBypassed?: boolean },
   ): string;
 
-  /** Prepended to both launch lines (e.g. `unset CLAUDECODE && `). */
+  /** Prepended to launch lines (e.g. `unset CLAUDECODE && `). */
   shellPrefix: string;
+
+  /** Optional native session control. Its absence means `--invisible` must
+   * fail, never silently fall back to headless or a hidden multiplexer. */
+  invisible?: InvisibleRuntime;
 }
 
 /** Optional support for inspecting a visible pane and vendor transcripts.
@@ -398,19 +406,23 @@ const claudeAdapter: ScreenReadingAgentAdapter = {
   kind: "claude",
   bin: "claude",
   modelKey: "model",
+  invisible: claudeInvisibleRuntime,
 
   runCmd(prompt, mode, wtPath, config, extraArgs, resume) {
     let cmd = "claude";
 
     if (mode === "headless") cmd += " -p";
+    if (mode === "invisible") cmd += " --bg";
     if (resume) cmd += " --continue";
 
     if (config.model) cmd += ` ${modelFlag(config.model)}`;
     if (config.permissionMode)
       cmd += ` ${permissionModeFlag(config.permissionMode)}`;
 
-    if (mode === "headless") {
+    if (mode !== "interactive") {
       cmd += ` --allowedTools "${config.allowedTools}"`;
+    }
+    if (mode === "headless") {
       if (config.maxTurns) cmd += ` --max-turns ${config.maxTurns}`;
       if (config.maxBudget) cmd += ` --max-budget-usd ${config.maxBudget}`;
       cmd += " --output-format stream-json --verbose";
@@ -418,7 +430,7 @@ const claudeAdapter: ScreenReadingAgentAdapter = {
 
     if (extraArgs) cmd += ` ${extraArgs}`;
 
-    if (mode === "headless") {
+    if (mode !== "interactive") {
       const promptFile = join(wtPath, ".dispatch-prompt.txt");
       writeFileSync(promptFile, prompt);
       // stdin redirection — command substitution gets mangled by tmux send-keys
@@ -647,6 +659,11 @@ const codexAdapter: ScreenReadingAgentAdapter = {
   modelKey: "codexModel",
 
   runCmd(prompt, mode, wtPath, config, extraArgs, resume) {
+    if (mode === "invisible") {
+      throw new Error(
+        "Codex does not support --invisible: its CLI has no stable native background session mode.",
+      );
+    }
     const parts = ["codex"];
 
     if (mode === "headless") {
