@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseSimpleYaml, loadConfig, modelFlag, permissionModeFlag } from "../src/config.js";
@@ -195,6 +195,53 @@ describe("loadConfig", () => {
       assert.equal(typeof config.claudeTimeout, "number");
     } finally {
       if (orig !== undefined) process.env.DISPATCH_CONFIG = orig;
+      else delete process.env.DISPATCH_CONFIG;
+    }
+  });
+
+  it("lets a repository config override the global config key by key", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-repo-cfg-"));
+    const global = join(dir, "global.yml");
+    const repo = join(dir, "repo");
+    const repoConfig = join(repo, ".dispatch.yml");
+    mkdirSync(repo);
+    writeFileSync(global, "base_branch: dev\nmodel: global-model\n");
+    writeFileSync(repoConfig, "base_branch: main\n");
+
+    const saved = process.env.DISPATCH_CONFIG;
+    process.env.DISPATCH_CONFIG = global;
+    try {
+      const config = loadConfig(undefined, { repoRoot: repo });
+      assert.equal(config.baseBranch, "main", "repository value should win");
+      assert.equal(config.model, "global-model", "missing repository key should fall through");
+    } finally {
+      if (saved !== undefined) process.env.DISPATCH_CONFIG = saved;
+      else delete process.env.DISPATCH_CONFIG;
+    }
+  });
+
+  it("warns and ignores a malformed repository config", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-bad-repo-cfg-"));
+    const global = join(dir, "global.yml");
+    const repo = join(dir, "repo");
+    mkdirSync(repo);
+    writeFileSync(global, "base_branch: main\n");
+    writeFileSync(join(repo, ".dispatch.yml"), "base_branch: [unterminated\n");
+    const warnings: string[] = [];
+
+    const saved = process.env.DISPATCH_CONFIG;
+    process.env.DISPATCH_CONFIG = global;
+    try {
+      const config = loadConfig(undefined, {
+        repoRoot: repo,
+        warn: (message) => warnings.push(message),
+      });
+      assert.equal(config.baseBranch, "main");
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /malformed repository config/i);
+      assert.match(warnings[0], /\.dispatch\.yml/);
+    } finally {
+      if (saved !== undefined) process.env.DISPATCH_CONFIG = saved;
       else delete process.env.DISPATCH_CONFIG;
     }
   });

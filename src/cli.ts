@@ -30,6 +30,7 @@ import {
   cmdDnd,
   cmdDone,
   cmdGc,
+  cmdDoctor,
 } from "./commands.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -221,6 +222,9 @@ async function main(): Promise<void> {
       break;
     case "gc":
       cmdGc(rest, config);
+      break;
+    case "doctor":
+      process.exitCode = cmdDoctor(config);
       break;
     case "dashboard":
       cmdDashboard(config);
