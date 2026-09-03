@@ -98,6 +98,7 @@ import {
   type ThreadPost,
 } from "./threads.js";
 import { collectInbox, inboxBody, hookJson, deliveredIds } from "./inbox.js";
+import { writeHookScript } from "./turnhook.js";
 import { readTurnState, type TurnState } from "./turnstate.js";
 import { recordAgent, readRegistry } from "./registry.js";
 import {
@@ -199,6 +200,21 @@ export function interactiveAgentCmd(config: Config, resume = false): string {
 /** Prefix both launch lines need in the pane (e.g. `unset CLAUDECODE && `). */
 function shellPrefix(config: Config): string {
   return getAdapter(config.agent).shellPrefix;
+}
+
+/** Write the turn-end hook into a worktree and configure the runtime to run
+ *  it. Returns launch args to append, which is empty for runtimes configured
+ *  by file rather than by flag.
+ *
+ *  The script runs *this* dispatch, resolved from argv, not whatever
+ *  `dispatch` is on PATH: a global install one version behind would answer
+ *  with a different message schema, and the failure would look like an agent
+ *  ignoring its mail. */
+export function installTurnEndHook(wtPath: string, config: Config): string {
+  const cli = process.argv[1];
+  if (!cli) throw new Error("cannot resolve the running dispatch binary");
+  const script = writeHookScript(wtPath, process.execPath, cli);
+  return getAdapter(config.agent).installTurnEndHook(wtPath, script);
 }
 
 /** The TUI never came up, so the pane is most likely a live shell. Pasting the
@@ -389,7 +405,25 @@ async function launchAgent(
   const mode = headless ? "headless" : "interactive";
   writeAgentMarker(wtPath, config.agent, mode);
 
-  const agentCmd = buildAgentCmd(prompt, mode, wtPath, config, extraArgs);
+  // Teach the agent to fetch its own thread messages at the end of every turn.
+  // Failing this must not fail the launch: an agent that runs without the hook
+  // still gets posts typed into its pane the old way, which is worse but is
+  // not nothing. A launch aborted over undeliverable mail would be worse still.
+  let hookArgs = "";
+  try {
+    hookArgs = installTurnEndHook(wtPath, config);
+  } catch (e) {
+    log.warn(`Could not install the turn-end hook: ${(e as Error).message}`);
+    log.dim("  Thread posts will be typed into its pane instead.");
+  }
+
+  const agentCmd = buildAgentCmd(
+    prompt,
+    mode,
+    wtPath,
+    config,
+    [extraArgs, hookArgs].filter(Boolean).join(" "),
+  );
   const prefix = shellPrefix(config);
 
   if (useCmux()) {

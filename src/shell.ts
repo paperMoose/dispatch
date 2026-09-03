@@ -176,6 +176,8 @@ const DISPATCH_ARTIFACTS = [
   ".dispatch.log",
   ".dispatch-dnd",
   ".dispatch-done",
+  ".dispatch-inbox-hook.sh",
+  ".claude/settings.local.json",
 ];
 
 /** Hide dispatch's own files from git.

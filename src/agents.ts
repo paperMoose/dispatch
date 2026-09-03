@@ -18,6 +18,7 @@ import {
 } from "fs";
 import { homedir } from "os";
 import { basename, join } from "path";
+import { codexHookArgs, installClaudeHook } from "./turnhook.js";
 import { modelFlag, permissionModeFlag, type Config } from "./config.js";
 
 export type AgentKind = "claude" | "codex";
@@ -141,6 +142,15 @@ export interface AgentAdapter {
   /** Launch line for an interactive pane. The prompt is pasted in afterwards,
    *  once the TUI reports ready. */
   paneCmd(config: Config, resume: boolean): string;
+
+  /** Make this runtime run `hookScript` when the agent finishes a turn, so it
+   *  fetches its own thread messages instead of being typed at.
+   *
+   *  Returns launch args to append. Claude is configured by a settings file in
+   *  the worktree and returns nothing; Codex takes its hook config as flags
+   *  and persists none of it. Both were proven end to end before this existed.
+   */
+  installTurnEndHook(wtPath: string, hookScript: string): string;
 
   /** Prepended to both launch lines (e.g. `unset CLAUDECODE && `). */
   shellPrefix: string;
@@ -396,6 +406,11 @@ const claudeAdapter: AgentAdapter = {
     return parts.join(" ");
   },
 
+  installTurnEndHook(wtPath, hookScript) {
+    installClaudeHook(wtPath, hookScript);
+    return "";
+  },
+
   // Claude Code refuses to start inside another Claude Code session.
   shellPrefix: "unset CLAUDECODE && ",
 
@@ -646,6 +661,10 @@ const codexAdapter: AgentAdapter = {
     parts.push("--search");
     parts.push(CODEX_NO_UPDATE_CHECK);
     return parts.join(" ");
+  },
+
+  installTurnEndHook(_wtPath, hookScript) {
+    return codexHookArgs(hookScript);
   },
 
   shellPrefix: "",

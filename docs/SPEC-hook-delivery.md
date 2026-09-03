@@ -156,9 +156,16 @@ duplicate-delivery bug ship. Demonstrate the red before claiming the green.
 4. ~~Codex: find the event and output shape that inject context, then its own
    loop-back test.~~ **Done.** Same `Stop` event, same envelope, live loop-back
    passed twice.
-5. Only once both runtimes are green: delete the compensating machinery
-   (readiness regex, `turnstate.ts`, the byte cap, the sleeps).
-6. Ship.
+5. ~~Install the hook at launch.~~ **Done.** `src/turnhook.ts`, an
+   `installTurnEndHook` method on `AgentAdapter`, called from `launchAgent`.
+   Claude gets `.claude/settings.local.json` in the worktree (the `.local`
+   overlay, so the tracked `settings.json` and the agent's own diff stay
+   clean); Codex gets launch flags and persists nothing. 18 tests, four
+   mutations verified red.
+6. Only once both runtimes are green in production use: delete the
+   compensating machinery (readiness regex, `turnstate.ts`, the byte cap, the
+   sleeps).
+7. Ship.
 
 Pane-typing stays in place as the fallback throughout. It is removed for no
 runtime until that runtime's loop-back test is green.
@@ -211,8 +218,14 @@ after emitting, so the next `Stop` finds an empty inbox and emits nothing. The
 silence-when-empty rule is the loop brake, not a bolted-on counter.
 
 The one way that breaks is if `recordDelivery` fails while emission succeeds,
-which would re-inject the same post forever. Worth a guard before this is
-enabled by default.
+which would re-inject the same post forever.
+
+**Guarded as of the launch-install work.** Both runtimes hand the hook a JSON
+payload on stdin carrying `stop_hook_active: true` once a stop hook has already
+made this turn continue. The script bails there, which caps injection at one
+per real turn end whatever else goes wrong. Verified in a real shell: a
+continuation payload produces silence, a normal payload reaches the fetch, and
+no stdin at all does not hang.
 
 ## Gate 0 result
 
