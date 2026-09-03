@@ -112,12 +112,14 @@ Agent Conversations:
   dispatch thread post t-4f2a --from a --replay "rg -n newHelper src/session.ts" "..."
   dispatch thread read t-4f2a           The whole conversation, for anyone joining late
 
-  Every post lands in a shared buffer under .dispatch-threads/ and is typed into
-  the other members' panes with the thread id, so they can answer. @mentions
-  address a subset. An agent on do-not-disturb still gets the buffer entry and
-  is handed everything it missed when do-not-disturb comes off. A reply chain
-  stops being delivered after --max-hops replies (default 12), so two agents
-  cannot keep each other awake forever.
+  Every post lands in a shared buffer under ~/.dispatch/threads/ and the other
+  members pick it up themselves when they next finish a turn, so nothing is
+  typed into a working agent and nothing is interrupted. Dispatch wires that up
+  at launch; you never run the fetch yourself. @mentions address a subset. An
+  agent on do-not-disturb still gets the buffer entry and is handed everything
+  it missed when do-not-disturb comes off. A reply chain stops being delivered
+  after --max-hops replies (default 12), so two agents cannot keep each other
+  awake forever.
 
   Forming a group needs your say-so; talking inside one does not. A thread you
   create is sanctioned because you created it. One an agent creates waits until

@@ -2216,7 +2216,9 @@ dispatch done "rewrote the IVR detector" --handoff "someone has to pick a thresh
 
 Inference cannot do this job: a finished agent, an agent mid-way through a 4,000-test suite, and an agent stuck all look the same from outside. \`dispatch resume\` clears the declaration, because a resumed agent is working again.
 
-**Agents can talk to each other.** \`dispatch directory\` lists every running agent, what it is working on (read from its brief, its history event, or its last message — nothing to keep up to date by hand) and whether it can be reached; \`--json\` for a machine-readable form. A thread is a shared buffer several agents confer in: each post is appended to \`.dispatch-threads/<id>.jsonl\` and typed into the other members' panes carrying the thread id, so they can reply into the same buffer.
+**Agents can talk to each other.** \`dispatch directory\` lists every running agent, what it is working on (read from its brief, its history event, or its last message — nothing to keep up to date by hand) and whether it can be reached; \`--json\` for a machine-readable form. A thread is a shared buffer several agents confer in: each post is appended to \`~/.dispatch/threads/<id>.jsonl\`, and the other members pick it up themselves when they next finish a turn.
+
+**Nothing is typed into a running agent.** Dispatch installs a turn-end hook at launch, and the agent fetches what it is owed with \`dispatch thread inbox\`. You never run that yourself. A message can therefore be any length, keeps its line breaks, and never lands mid-thought. Agents launched before this, and runtimes without hooks, fall back to having posts typed into their pane.
 
 \`\`\`bash
 dispatch directory                                    # who is running, what they're on, who is reachable
@@ -2233,7 +2235,9 @@ dispatch dnd hey-838 off                              # everything it missed is 
 dispatch dnd                                          # who is currently on do-not-disturb
 
 dispatch thread pending                               # what is waiting on your approval
-dispatch thread approve t-4f2a                        # release it into the recipients' panes
+dispatch thread approve t-4f2a                        # release it to the members
+
+dispatch thread --help                                # every subcommand, always current
 \`\`\`
 
 **Forming a group needs your say-so; talking inside one does not.** A thread you create is sanctioned because you created it, and its members then coordinate freely. A thread an *agent* creates waits: nobody is interrupted, you get a notification, and \`dispatch thread pending\` lists it. One \`dispatch thread approve <tid>\` opens it for good — approving every message would make a swarm unusable, and a swarm keeping out of its own way is what this is for.
