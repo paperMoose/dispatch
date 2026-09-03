@@ -67,9 +67,17 @@ Commands:
   dispatch resume <id> [--headless]        Restart a stopped agent (keeps context)
   dispatch cleanup <id> [--delete-branch]  Remove worktree (and optionally branch)
   dispatch cleanup --all [--delete-branch] Remove all worktrees
-  dispatch prune [--delete-branch]         Remove worktrees with no active session
+  dispatch gc [--older-than N] [--apply]   Collect worktrees nobody is using. Dry run
+                                           unless --apply; rescues uncommitted work to
+                                           refs/dispatch-rescue/<id> before removing
+  dispatch gc --rescued                    List rescues and how to restore one
+  dispatch prune [--delete-branch]         Remove worktrees with no active session.
+                                           Skips any with uncommitted changes, so a stale
+                                           dirty worktree lives forever; prefer gc
   dispatch reap [--dry-run] [--delete-branch]
                                            Remove worktrees whose cmux tab has been closed
+  dispatch doctor                          Check the setup and say what to fix. Non-zero
+                                           exit when something is broken
   dispatch history [N]                     Show past agent runs (default: last 20)
   dispatch find <query>                    Search across all agent terminal content
   dispatch attach <id>                     Open an interactive or invisible session
