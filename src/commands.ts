@@ -3213,6 +3213,43 @@ do-not-disturb holds delivery without losing the post (dispatch dnd), and a
 reply chain stops being delivered after --max-hops (default 12) until a person
 posts, which starts a fresh chain.`;
 
+/** One fetch of an agent's owed posts, emitted for a hook or for a
+ *  person. Split out of cmdThread so the caller can promise that nothing
+ *  here escapes: see the try/catch at its only call site. */
+function inboxOnce(dir: string, me: string, asHook: boolean): void {
+  const items = collectInbox(listThreads(dir), me);
+  let body = inboxBody(items, me);
+  if (!body) return;
+
+  // Record before emitting, and never let recording failure stop the
+  // emission. Both orders have a failure mode and this one is far smaller:
+  // recording is a file append that fails for real reasons (permissions, a
+  // full disk), while losing the emission after a successful record needs
+  // the process killed inside a microsecond window.
+  //
+  // Measured what the other order actually does: with the thread file
+  // read-only, the hook wrote 296 bytes of valid JSON and then exited 1.
+  // A failing hook that has already spoken, with the delivery unrecorded,
+  // so the agent is handed the same post again on every future turn.
+  let recorded = true;
+  for (const { thread, post } of deliveredIds(items)) {
+    try {
+      recordDelivery(dir, thread, { post, delivered: [me], undelivered: [] });
+    } catch {
+      recorded = false;
+    }
+  }
+  if (!recorded) {
+    // Say so in the message rather than only on stderr, which no agent
+    // reads. It is about to see this again and should know why.
+    body +=
+      "\n\n(dispatch could not record this delivery, so you may be shown " +
+      "it again. Answer it once.)";
+  }
+
+  process.stdout.write(asHook ? hookJson(body) : body + "\n");
+}
+
 export function cmdThread(args: string[], config: Config): void {
   const sub = args[0];
   const rest = args.slice(1);
@@ -3482,17 +3519,14 @@ export function cmdThread(args: string[], config: Config): void {
     // nothing is recorded, so every post stays owed until the agent lifts it.
     if (readDnd(worktreePath(me, config))) return;
 
-    const items = collectInbox(listThreads(dir), me);
-    const body = inboxBody(items, me);
-    if (!body) return;
-
-    process.stdout.write(asHook ? hookJson(body) : body + "\n");
-
-    // Recorded only after the write has gone out. The other order loses a
-    // message for good if this process dies mid-flight, and a message that
-    // silently never arrives is the worst failure this system has.
-    for (const { thread, post } of deliveredIds(items)) {
-      recordDelivery(dir, thread, { post, delivered: [me], undelivered: [] });
+    // From here on nothing may throw. This runs at the end of every turn of
+    // every agent, and a hook that exits non-zero is a hook the runtime
+    // reports as broken on every single turn. Undelivered mail is a problem;
+    // an agent that cannot finish a turn cleanly is a bigger one.
+    try {
+      inboxOnce(dir, me, asHook);
+    } catch (e) {
+      process.stderr.write(`dispatch thread inbox: ${(e as Error).message}\n`);
     }
     return;
   }
