@@ -124,6 +124,62 @@ Keeping these out is what stops the interface sprawling to 40 methods.
 - **The thread buffer.** That is a file.
 - **Runtime differences.** That is `AgentAdapter`, which already exists.
 
+## Verification gate
+
+This refactor is unusual in that **it must change nothing**. That is a gift: the
+gate can be far stricter than for work that adds behaviour.
+
+### Gate 1: the existing suite passes untouched
+
+All tests green **without editing a single test file**. A test that needs
+changing means behaviour changed, and behaviour changing is the failure
+condition here. Mechanically: `git diff --stat` for the refactor must show zero
+lines changed under `tests/`.
+
+This is the whole reason to extract the seam before adding anything through it.
+
+### Gate 2: the counters go to zero
+
+The refactor's stated purpose, measured rather than reviewed:
+
+| Metric | Before | After |
+|---|---|---|
+| `useCmux()` call sites | 25 | **1**, inside the adapter lookup |
+| `getCmuxWorkspaceId` / `loadCmuxWorkspaceId` outside `cmux.ts` | 24 | **0** |
+| raw `tmux`/`cmux(` calls outside `shell.ts` and `cmux.ts` | 28 | **0** |
+
+These are grep counts, so they belong in CI as assertions rather than in a
+reviewer's judgement. A 26th `useCmux()` added a year from now fails the build
+and says why.
+
+### Gate 3: a null backend that throws on everything
+
+Write `NullMultiplexer`: implements the full interface, throws on every method,
+never shipped, test-only. Its job is to prove the interface is **complete**. If
+dispatch can be constructed and driven against it without any code reaching
+around it into tmux or cmux, the seam is real.
+
+**Weight this highest.** Gates 1 and 2 can both pass while the abstraction is
+still fake: an interface can look clean while two callers quietly special-case
+underneath it. The null backend is where that surfaces, because anything
+reaching around the seam either compiles against nothing or throws.
+
+### Gate 4: live runs on both backends
+
+Tests cannot prove a terminal still works. Same shape as the hook-delivery
+walkthroughs: launch a real agent, have it receive a thread post and reply.
+
+- Under **cmux**.
+- Under **tmux**. This one matters more, because tmux has never had a live run
+  at all. Every real agent in the hook-delivery work ran under cmux, and
+  `integration-tmux.test.ts` drives panes but not a real agent.
+
+### Gate 5: red-on-revert
+
+Same discipline as everywhere else. For gates 2 and 3, demonstrate the
+assertion failing against the current code before claiming it passes against
+the new. A gate that was green before the work is not a gate.
+
 ## Order of work
 
 1. Land the hook path in real use and delete the compensating machinery
