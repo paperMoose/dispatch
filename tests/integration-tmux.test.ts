@@ -8,7 +8,7 @@
 // Sessions are uniquely named and killed in a finally. Nothing here touches a
 // session it did not create, and `kill-server` is never used: the suite
 // routinely runs inside a multiplexer the developer is also using.
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
@@ -17,6 +17,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -72,6 +73,30 @@ const skipLiveness = !HAVE_TMUX
 function agentId(what: string): string {
   return `disp-it-${what}-${randomBytes(4).toString("hex")}`;
 }
+
+/** Thread ids this file created, so they can be removed afterwards.
+ *
+ *  `threadsDir()` is the real `~/.dispatch/threads`, not a temp directory, and
+ *  these tests were leaving their buffers in it: 102 of the 109 files there
+ *  were test leftovers, which made `dispatch thread list` 94% noise. A test
+ *  that writes to a person's actual state has to clean up after itself. */
+const createdThreads = new Set<string>();
+
+function threadId(): string {
+  const tid = `t-${randomBytes(3).toString("hex")}`;
+  createdThreads.add(tid);
+  return tid;
+}
+
+after(() => {
+  for (const tid of createdThreads) {
+    try {
+      rmSync(join(threadsDir(), `${tid}.jsonl`), { force: true });
+    } catch {
+      // Best effort: a leftover file is untidy, a failing teardown is worse.
+    }
+  }
+});
 
 function tempDir(what: string): string {
   // Resolved: /var/folders/… is a symlink to /private/var/…, and both `git
@@ -570,7 +595,7 @@ describe("agent threads through real panes", { skip }, () => {
       mkdirSync(worktreePath(gone, config), { recursive: true });
 
       try {
-        const tid = `t-${randomBytes(3).toString("hex")}`;
+        const tid = threadId();
         cmdThread(["new", alpha, bravo, gone, "--id", tid, "--topic", "session.ts"], config);
 
         const messageFile = join(repo, "post.txt");
@@ -642,7 +667,7 @@ describe("agent threads through real panes", { skip }, () => {
       try {
         cmdDnd([quiet, "on", "--reason", "mid-migration"], config);
 
-        const tid = `t-${randomBytes(3).toString("hex")}`;
+        const tid = threadId();
         cmdThread(["new", alpha, quiet, "--id", tid], config);
         const messageFile = join(repo, "post.txt");
         writeFileSync(messageFile, "the schema change is ready for review");
