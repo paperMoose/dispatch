@@ -193,8 +193,12 @@ export function buildAgentCmd(
 
 /** Launch line for an interactive pane. Unlike headless, the prompt is pasted
  *  in after the agent's TUI is up, so this starts the CLI bare. */
-export function interactiveAgentCmd(config: Config, resume = false): string {
-  return getAdapter(config.agent).paneCmd(config, resume);
+export function interactiveAgentCmd(
+  config: Config,
+  resume = false,
+  extraArgs = "",
+): string {
+  return getAdapter(config.agent).paneCmd(config, resume, extraArgs);
 }
 
 /** Prefix both launch lines need in the pane (e.g. `unset CLAUDECODE && `). */
@@ -431,7 +435,7 @@ async function launchAgent(
     cmuxUpdateState(id, wtPath, "starting", `Launching agent (${mode})`);
 
     if (mode === "interactive") {
-      cmuxSend(wsId!, `${prefix}${interactiveAgentCmd(config)}`);
+      cmuxSend(wsId!, `${prefix}${interactiveAgentCmd(config, false, hookArgs)}`);
       const ready = waitForAgent(id, config.claudeTimeout, getAdapter(config.agent));
       if (!ready) {
         promptNotSent(id, wtPath, prompt, config);
@@ -470,7 +474,7 @@ async function launchAgent(
     }
   } else if (mode === "interactive") {
     // Launch the agent, wait for it to be ready, then send prompt via paste-buffer
-    const launch = interactiveAgentCmd(config);
+    const launch = interactiveAgentCmd(config, false, hookArgs);
     tmuxSendCommand(id, `${prefix}${launch}`);
     if (!waitForAgent(id, config.claudeTimeout, getAdapter(config.agent))) {
       promptNotSent(id, wtPath, prompt, config);
@@ -1438,11 +1442,23 @@ export function cmdResume(args: string[], config: Config): void {
   const prefix = shellPrefix(config);
   const resumePrompt = "Continue working on the task.";
 
+  // Reinstall on resume, not just at launch. The agent may predate the hook
+  // entirely, its config.agent may have flipped runtime just above, and Codex
+  // persists nothing between runs — so for Codex the flags have to be passed
+  // again every single time or a resumed agent stops fetching its mail.
+  let hookArgs = "";
+  try {
+    hookArgs = installTurnEndHook(wtPath, config);
+  } catch (e) {
+    log.warn(`Could not install the turn-end hook: ${(e as Error).message}`);
+    log.dim("  Thread posts will be typed into its pane instead.");
+  }
+
   if (useCmux()) {
     const wsId = sessionId;
     cmuxUpdateState(id, wtPath, "running", `Resuming agent (${headless ? "headless" : "interactive"})`);
     if (!headless) {
-      cmuxSend(wsId!, `${prefix}${interactiveAgentCmd(config, true)}`);
+      cmuxSend(wsId!, `${prefix}${interactiveAgentCmd(config, true, hookArgs)}`);
       log.ok(`Resumed agent: ${id} (interactive)`);
       if (!noAttach) tmuxAttach(id, false);
     } else {
@@ -1452,7 +1468,7 @@ export function cmdResume(args: string[], config: Config): void {
       log.ok(`Resumed agent: ${id} (headless)`);
     }
   } else if (!headless) {
-    const launch = interactiveAgentCmd(config, true);
+    const launch = interactiveAgentCmd(config, true, hookArgs);
     tmuxSendCommand(id, `${prefix}${launch}`);
     log.ok(`Resumed agent: ${id} (interactive)`);
     if (!noAttach) tmuxAttach(id, false);

@@ -140,8 +140,13 @@ export interface AgentAdapter {
   ): string;
 
   /** Launch line for an interactive pane. The prompt is pasted in afterwards,
-   *  once the TUI reports ready. */
-  paneCmd(config: Config, resume: boolean): string;
+   *  once the TUI reports ready.
+   *
+   *  `extraArgs` carries anything the launch itself must configure, currently
+   *  the turn-end hook. It matters here and not only in `runCmd` because a
+   *  runtime configured by flags rather than by file gets no hook at all
+   *  otherwise, and interactive is the common case. */
+  paneCmd(config: Config, resume: boolean, extraArgs?: string): string;
 
   /** Make this runtime run `hookScript` when the agent finishes a turn, so it
    *  fetches its own thread messages instead of being typed at.
@@ -397,12 +402,14 @@ const claudeAdapter: AgentAdapter = {
     return cmd;
   },
 
-  paneCmd(config, resume) {
+  paneCmd(config, resume, extraArgs) {
     const parts = ["claude"];
     if (resume) parts.push("--continue");
     if (config.model) parts.push(modelFlag(config.model));
     if (config.permissionMode) parts.push(permissionModeFlag(config.permissionMode));
     parts.push(`--allowedTools "WebSearch,WebFetch"`);
+    // Claude's hook is a settings file, so extraArgs is normally empty here.
+    if (extraArgs) parts.push(extraArgs);
     return parts.join(" ");
   },
 
@@ -651,7 +658,7 @@ const codexAdapter: AgentAdapter = {
     return cmd;
   },
 
-  paneCmd(config, resume) {
+  paneCmd(config, resume, extraArgs) {
     const parts = ["codex"];
     if (resume) parts.push("resume", "--last");
     if (config.codexModel) parts.push(modelFlag(config.codexModel, "-m"));
@@ -660,6 +667,9 @@ const codexAdapter: AgentAdapter = {
     parts.push(codexSandboxFlags(config, "tui"));
     parts.push("--search");
     parts.push(CODEX_NO_UPDATE_CHECK);
+    // Codex configures hooks by flag and persists nothing, so without this an
+    // interactive Codex agent never fetches its mail. It is the default agent.
+    if (extraArgs) parts.push(extraArgs);
     return parts.join(" ");
   },
 

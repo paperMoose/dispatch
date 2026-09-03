@@ -11,6 +11,8 @@ import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSy
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { getAdapter } from "../src/agents.js";
+import type { Config } from "../src/config.js";
 import {
   CLAUDE_LOCAL_SETTINGS,
   HOOK_SCRIPT,
@@ -161,5 +163,33 @@ describe("Codex launch flags", () => {
     // Codex takes milliseconds here and Claude takes seconds. A 15 that meant
     // 15ms would kill the hook on a cold start every time.
     assert.ok(codexHookArgs("/wt/h.sh").includes("timeout=15000"));
+  });
+});
+
+describe("the interactive launch line carries the hook", () => {
+  // Found by review, not by a test, and it would have shipped silently:
+  // interactiveAgentCmd took no extra args, so an interactive Codex agent
+  // never got its hook. Codex configures hooks by flag and persists nothing,
+  // and codex is the default agent, so that is the common case broken.
+  // Claude was unaffected because its hook is a settings file, which is
+  // exactly why testing only Claude would have missed it.
+  const cfg = (agent: string): Config =>
+    ({ agent, model: "", codexModel: "", reasoningEffort: "", permissionMode: "" }) as Config;
+
+  it("passes hook flags into a Codex pane launch", () => {
+    const line = getAdapter("codex").paneCmd(cfg("codex"), false, "--enable hooks -c 'hooks.Stop=X'");
+    assert.ok(line.includes("--enable hooks"), line);
+    assert.ok(line.includes("hooks.Stop=X"), line);
+  });
+
+  it("passes them on resume too, since Codex persists nothing between runs", () => {
+    const line = getAdapter("codex").paneCmd(cfg("codex"), true, "--enable hooks -c 'hooks.Stop=X'");
+    assert.ok(line.includes("hooks.Stop=X"), line);
+  });
+
+  it("leaves the Claude pane launch unchanged when there is nothing to add", () => {
+    const line = getAdapter("claude").paneCmd(cfg("claude"), false, "");
+    assert.ok(!line.includes("hooks.Stop"), line);
+    assert.ok(line.startsWith("claude"), line);
   });
 });
