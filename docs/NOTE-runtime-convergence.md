@@ -210,3 +210,63 @@ next. None of them do any of this:
 Note the reordering. The harness axis is the one Ryan asked to open, and it is
 also where the measured cost is. The multiplexer seam was drafted first because
 it looked untidiest, which is not the same as mattering most.
+
+---
+
+# Codex: a full protocol, and the tension it creates
+
+`codex app-server generate-json-schema --out <dir>` emits the protocol. The v2
+surface is **236 types**, and it carries everything dispatch does by hand:
+
+| Dispatch needs | Codex v2 primitive |
+|---|---|
+| launch an agent | `ThreadStart` |
+| resume one | `ThreadResume` |
+| list them | `ThreadList`, `ThreadLoadedList` |
+| know its state | `ThreadStatusChangedNotification` (**pushed**, not polled) |
+| know a turn ended | `TurnCompletedNotification` (**pushed**) |
+| stop it | `TurnInterrupt` |
+| `dispatch send` | `TurnSteer`, or `ThreadInjectItems` |
+| clean up | `ThreadArchive`, `ThreadDelete` |
+
+`TurnCompletedNotification` is a turn boundary as a push event, which would
+replace even the hook for Codex. `TurnSteer` and `ThreadInjectItems` answer the
+question left open above: yes, a running Codex session can be sent a message.
+
+Claude is the weaker side here. `--bg`, `agents --json`, `attach`, `logs` and
+`respawn` cover launch, list, observe and reattach, but there is **no
+CLI-level way to send a message into a running background session**. So the
+open question is answered for Codex and still open for Claude.
+
+## The tension
+
+Adopting these makes Claude and Codex much simpler and cuts most of the
+screen-reading code. It does **not** advance "work with every agent harness."
+A harness picked at random has no app-server protocol and no `--bg`. Leaning on
+these primitives is a per-vendor fast path, not a general mechanism, and taken
+too far it makes dispatch a wrapper around two vendors instead of a layer above
+many.
+
+Both codex `app-server` and `remote-control` are also marked **[experimental]**
+in their own help. Making dispatch's core depend on an experimental protocol is
+a real risk, not a theoretical one.
+
+## The shape that resolves it
+
+Two tiers, and be explicit about which is which.
+
+**The floor, required of every harness, four things:**
+a binary and a launch line; a way to run a command when a turn ends (hooks,
+which cmux already integrates for seventeen harnesses); how to resume; and a
+worktree, which is dispatch's own and needs nothing from the harness.
+
+Any harness meeting that gets worktrees, threads, cleanup and the directory.
+That is the promise.
+
+**The fast path, optional, per harness:**
+native listing, pushed state, native send. Claude and Codex get it today.
+Everyone else falls back to the floor and works, just with less fidelity.
+
+This is the same required-core-plus-optional-capabilities shape already
+proposed for the multiplexer seam, applied to the harness axis, where the
+measured cost actually is.
