@@ -1,6 +1,7 @@
 import { readFileSync } from "fs";
+import { spawnSync } from "child_process";
 import { AGENT_KINDS, REASONING_EFFORTS } from "./agents.js";
-import { join } from "path";
+import { join, resolve } from "path";
 import { homedir } from "os";
 
 export interface Config {
@@ -68,6 +69,13 @@ const KEY_MAP: Record<string, keyof Config> = {
   agent_timeout: "claudeTimeout",
 };
 
+export interface LoadConfigOptions {
+  /** Explicit repository root for callers that already resolved it and tests. */
+  repoRoot?: string | null;
+  /** Receives non-fatal config diagnostics. */
+  warn?: (message: string) => void;
+}
+
 export function parseSimpleYaml(content: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const line of content.split("\n")) {
@@ -89,27 +97,122 @@ export function parseSimpleYaml(content: string): Record<string, string> {
   return result;
 }
 
-export function loadConfig(cliOverrides?: Partial<Config>): Config {
-  const config: Config = { ...DEFAULTS };
+/** Validate the flat YAML subset dispatch supports before parsing it.
+ *
+ * `parseSimpleYaml` intentionally remains forgiving because it is a public,
+ * separately tested utility. Config files need a stricter boundary: silently
+ * accepting half of a malformed repository override is more surprising than
+ * ignoring it with one actionable warning. */
+function parseConfigYaml(content: string): Record<string, string> {
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
 
-  // 1. Load config file
-  const configPath =
-    process.env.DISPATCH_CONFIG || join(homedir(), ".dispatch.yml");
-  try {
-    const raw = readFileSync(configPath, "utf-8");
-    const parsed = parseSimpleYaml(raw);
-    for (const [yamlKey, value] of Object.entries(parsed)) {
-      const configKey = KEY_MAP[yamlKey];
-      if (configKey) {
-        (config as any)[configKey] =
-          configKey === "claudeTimeout" ? Number(value) : value;
-      }
+    const idx = trimmed.indexOf(":");
+    if (idx <= 0) {
+      throw new Error(`line ${i + 1} is not a key: value pair`);
     }
-  } catch {
-    // No config file — that's fine
+
+    const key = trimmed.slice(0, idx).trim();
+    const value = trimmed.slice(idx + 1).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)) {
+      throw new Error(`line ${i + 1} has an invalid key`);
+    }
+    if (
+      (value.startsWith('"') && !value.endsWith('"')) ||
+      (value.startsWith("'") && !value.endsWith("'")) ||
+      (value.startsWith("[") && !value.endsWith("]")) ||
+      (value.startsWith("{") && !value.endsWith("}"))
+    ) {
+      throw new Error(`line ${i + 1} has an unterminated value`);
+    }
+  }
+  return parseSimpleYaml(content);
+}
+
+function configLayer(parsed: Record<string, string>): Partial<Config> {
+  const layer: Partial<Config> = {};
+  for (const [yamlKey, value] of Object.entries(parsed)) {
+    const configKey = KEY_MAP[yamlKey];
+    if (!configKey) continue;
+    if (configKey === "claudeTimeout") {
+      const timeout = Number(value);
+      if (!Number.isFinite(timeout) || timeout <= 0) {
+        throw new Error(`${yamlKey} must be a positive number`);
+      }
+      layer.claudeTimeout = timeout;
+    } else {
+      (layer as Record<string, unknown>)[configKey] = value;
+    }
+  }
+  return layer;
+}
+
+function readConfigLayer(
+  path: string,
+  label: "global" | "repository",
+  warn: (message: string) => void,
+): Partial<Config> | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ENOENT") {
+      warn(
+        `Could not read ${label} config ${path}: ${(error as Error).message}. ` +
+        "Fix its permissions or remove it.",
+      );
+    }
+    return null;
   }
 
-  // 2. Env vars override config file
+  try {
+    return configLayer(parseConfigYaml(raw));
+  } catch (error) {
+    warn(
+      `Ignoring malformed ${label} config ${path}: ${(error as Error).message}. ` +
+      "Fix the file and rerun dispatch doctor.",
+    );
+    return null;
+  }
+}
+
+/** The checkout root, not the shared git-common-dir root. A tracked
+ * `.dispatch.yml` belongs to this checkout and should work in linked
+ * worktrees as well as in the primary one. */
+export function findRepositoryRoot(cwd = process.cwd()): string | null {
+  const result = spawnSync(
+    "git",
+    ["-C", cwd, "rev-parse", "--show-toplevel"],
+    { encoding: "utf-8", stdio: "pipe" },
+  );
+  return result.status === 0 ? result.stdout.trim() || null : null;
+}
+
+export function loadConfig(
+  cliOverrides?: Partial<Config>,
+  options: LoadConfigOptions = {},
+): Config {
+  const config: Config = { ...DEFAULTS };
+  const warn = options.warn || ((message: string) => console.warn(`Warning: ${message}`));
+
+  // 1. Global config establishes personal defaults.
+  const configPath =
+    process.env.DISPATCH_CONFIG || join(homedir(), ".dispatch.yml");
+  const globalLayer = readConfigLayer(configPath, "global", warn);
+  if (globalLayer) Object.assign(config, globalLayer);
+
+  // 2. Repository config overrides only the keys it contains.
+  const repoRoot =
+    options.repoRoot === undefined ? findRepositoryRoot() : options.repoRoot;
+  const repoConfigPath = repoRoot ? join(repoRoot, ".dispatch.yml") : null;
+  if (repoConfigPath && resolve(repoConfigPath) !== resolve(configPath)) {
+    const repoLayer = readConfigLayer(repoConfigPath, "repository", warn);
+    if (repoLayer) Object.assign(config, repoLayer);
+  }
+
+  // 3. Environment variables override both files.
   const envMap: [string, keyof Config][] = [
     ["DISPATCH_BASE_BRANCH", "baseBranch"],
     ["DISPATCH_AGENT", "agent"],
@@ -152,7 +255,7 @@ export function loadConfig(cliOverrides?: Partial<Config>): Config {
     );
   }
 
-  // 3. CLI flags override everything
+  // 4. CLI flags override everything.
   if (cliOverrides) {
     for (const [key, value] of Object.entries(cliOverrides)) {
       if (value !== undefined && value !== "") {
