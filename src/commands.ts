@@ -12,7 +12,14 @@ import {
   REASONING_EFFORTS,
   AGENT_KINDS,
   type AgentLogSummary,
+  type RunMode,
 } from "./agents.js";
+import {
+  findInvisibleSession,
+  invisibleUnsupportedMessage,
+  runModeFromFlags,
+  type InvisibleSession,
+} from "./runner.js";
 import {
   buildPlistXml,
   cronToLaunchdIntervals,
@@ -177,7 +184,7 @@ function warnUnsupported(config: Config): void {
 
 export function buildAgentCmd(
   prompt: string,
-  mode: "interactive" | "headless",
+  mode: RunMode,
   wtPath: string,
   config: Config,
   extraArgs: string,
@@ -267,12 +274,13 @@ const AGENT_MARKER = ".dispatch-agent";
 function writeAgentMarker(
   wtPath: string,
   agent: string,
-  mode: "interactive" | "headless",
+  mode: RunMode,
+  nativeId = "",
 ): void {
   try {
     writeFileSync(
       join(wtPath, AGENT_MARKER),
-      JSON.stringify({ agent, mode }) + "\n",
+      JSON.stringify({ agent, mode, ...(nativeId ? { nativeId } : {}) }) + "\n",
     );
   } catch {
     // Non-fatal: readers fall back to the configured runtime.
@@ -289,7 +297,8 @@ export function readAgentMarker(wtPath: string, fallback = "claude"): string {
  *  name rather than JSON, so parse both forms. */
 export function readAgentState(wtPath: string): {
   agent: string;
-  mode: "interactive" | "headless" | null;
+  mode: RunMode | null;
+  nativeId?: string;
 } {
   let raw: string;
   try {
@@ -302,13 +311,34 @@ export function readAgentState(wtPath: string): {
   if (raw.startsWith("{")) {
     try {
       const parsed = JSON.parse(raw);
-      return { agent: parsed.agent || "", mode: parsed.mode || null };
+      return {
+        agent: parsed.agent || "",
+        mode: parsed.mode || null,
+        ...(parsed.nativeId ? { nativeId: parsed.nativeId } : {}),
+      };
     } catch {
       return { agent: "", mode: null };
     }
   }
   // Pre-0.9.1 marker: runtime only, mode unknown.
   return { agent: raw, mode: null };
+}
+
+/** Native session for an invisible worktree, if the runtime still reports it
+ * active. No pane, pid, lsof, or transcript inference participates. */
+function invisibleSessionForPath(
+  wtPath: string,
+  fallbackAgent = "claude",
+): InvisibleSession | null {
+  const state = readAgentState(wtPath);
+  if (state.mode !== "invisible") return null;
+  const adapter = getAdapter(state.agent || fallbackAgent);
+  if (!adapter.invisible) return null;
+  return findInvisibleSession(adapter.invisible.list(), wtPath, state.nativeId);
+}
+
+function invisibleSessionForId(id: string, config: Config): InvisibleSession | null {
+  return invisibleSessionForPath(worktreePath(id, config), config.agent);
 }
 
 /** @deprecated Runtime-neutral names are buildAgentCmd / interactiveAgentCmd. */
@@ -321,7 +351,7 @@ export const interactiveClaudeCmd = interactiveAgentCmd;
 // ---------------------------------------------------------------------------
 async function launchAgent(
   input: string,
-  headless: boolean,
+  mode: RunMode,
   extraArgs: string,
   skipWorktree: boolean,
   promptFileArg: string,
@@ -389,7 +419,7 @@ async function launchAgent(
   prompt = prompt.trimEnd() + REPORT_BACK;
 
   // Check if already running
-  if (sessionExists(id)) {
+  if (sessionExists(id) || invisibleSessionForId(id, config)) {
     log.error(`Agent '${id}' is already running. Use 'dispatch stop ${id}' first.`);
     return null;
   }
@@ -408,21 +438,24 @@ async function launchAgent(
     if (noAsk) stripAskRules(wtPath);
   }
 
-  // Create multiplexer session — returns cmux workspace ID or "tmux"
-  const sessionId = createSession(id, wtPath);
-  if (!sessionId) return null;
-
-  const mode = headless ? "headless" : "interactive";
-  writeAgentMarker(wtPath, config.agent, mode);
+  // Invisible sessions belong to the runtime, so they create no multiplexer
+  // session at all. Visible and headless runs keep the existing pane path.
+  const sessionId = mode === "invisible" ? null : createSession(id, wtPath);
+  if (mode !== "invisible" && !sessionId) return null;
+  if (mode !== "invisible") writeAgentMarker(wtPath, config.agent, mode);
 
   // Teach the agent to fetch its own thread messages at the end of every turn.
-  // Failing this must not fail the launch: an agent that runs without the hook
-  // still gets posts typed into its pane the old way, which is worse but is
-  // not nothing. A launch aborted over undeliverable mail would be worse still.
+  // Pane-backed modes retain their typed-message fallback if this fails. An
+  // invisible session has no such fallback, so it must not launch hookless.
   let hookArgs = "";
   try {
     hookArgs = installTurnEndHook(wtPath, config);
   } catch (e) {
+    if (mode === "invisible") {
+      log.error(`Could not install the turn-end hook: ${(e as Error).message}`);
+      log.dim("  Invisible launch stopped: there is no pane fallback for thread delivery.");
+      return null;
+    }
     log.warn(`Could not install the turn-end hook: ${(e as Error).message}`);
     log.dim("  Thread posts will be typed into its pane instead.");
   }
@@ -436,7 +469,24 @@ async function launchAgent(
   );
   const prefix = shellPrefix(config);
 
-  if (useCmux()) {
+  if (mode === "invisible") {
+    const runtime = getAdapter(config.agent).invisible!;
+    const launched = runtime.launch(`${prefix}${agentCmd}`, wtPath);
+    if (!launched.ok) {
+      log.error(`Failed to launch invisible ${config.agent} session.`);
+      const detail = (launched.stderr || launched.stdout).trim();
+      if (detail) log.dim(`  ${detail.split("\n")[0]}`);
+      return null;
+    }
+    const native = findInvisibleSession(runtime.list(), wtPath, launched.id);
+    const nativeId = launched.id || native?.id || "";
+    if (!nativeId) {
+      log.error(`Invisible ${config.agent} session started, but its native session id was not reported.`);
+      log.dim(`  Find it with: ${getAdapter(config.agent).bin} agents --json`);
+      return null;
+    }
+    writeAgentMarker(wtPath, config.agent, mode, nativeId);
+  } else if (useCmux()) {
     const wsId = sessionId;  // use the ID we just created, don't re-resolve
     cmuxUpdateState(id, wtPath, "starting", `Launching agent (${mode})`);
 
@@ -534,9 +584,12 @@ async function launchAgent(
   log.ok(`Agent ${fmt.BOLD}${id}${fmt.NC} launched (${mode})`);
   log.dim(`  Worktree: ${wtPath}`);
   log.dim(`  Branch:   ${branch}`);
-  if (headless) {
+  if (mode === "headless") {
     log.dim(`  Logs:     dispatch logs ${id}`);
     log.dim(`  Stop:     dispatch stop ${id}`);
+  } else if (mode === "invisible") {
+    log.dim(`  Attach:   dispatch attach ${id}`);
+    log.dim(`  Status:   dispatch status ${id}`);
   }
   return id;
 }
@@ -549,7 +602,14 @@ export async function cmdRun(
   config: Config,
 ): Promise<void> {
   const inputs: string[] = [];
-  let headless = false;
+  let mode: RunMode;
+  try {
+    mode = runModeFromFlags(args);
+  } catch (error) {
+    log.error((error as Error).message);
+    process.exit(1);
+    return;
+  }
   let promptFile = "";
   let extraArgs = "";
   let skipWorktree = false;
@@ -567,7 +627,7 @@ export async function cmdRun(
     switch (arg) {
       case "--headless":
       case "-H":
-        headless = true;
+      case "--invisible":
         i++;
         break;
       case "--model":
@@ -669,12 +729,19 @@ export async function cmdRun(
     config[getAdapter(config.agent).modelKey] = modelOverride;
   }
 
+  if (mode === "invisible" && !getAdapter(config.agent).invisible) {
+    log.error(invisibleUnsupportedMessage(config.agent));
+    process.exit(1);
+    return;
+  }
+
   if (inputs.length === 0 && !promptFile) {
     log.error("Usage: dispatch run <ticket|prompt> [ticket2 ...] [options]");
     console.log();
     console.log('  dispatch run HEY-837                         # from Linear ticket');
     console.log('  dispatch run HEY-837 HEY-838 HEY-839        # batch launch');
     console.log('  dispatch run HEY-837 --headless              # run in background');
+    console.log('  dispatch run HEY-837 --invisible             # off-screen session, attach later');
     console.log('  dispatch run "Fix the auth bug"               # free text prompt');
     console.log("  dispatch run HEY-837 --model sonnet          # specific model");
     console.log("  dispatch run HEY-837 --agent codex           # run on Codex instead of Claude");
@@ -689,7 +756,7 @@ export async function cmdRun(
     inputs.push("prompt-file");
   }
 
-  ensureMultiplexer();
+  if (mode !== "invisible") ensureMultiplexer();
 
   if (inputs.length > 1) {
     log.info(`Batch launching ${inputs.length} agents...`);
@@ -698,14 +765,14 @@ export async function cmdRun(
 
   const launchedIds: string[] = [];
   for (const input of inputs) {
-    const id = await launchAgent(input, headless, extraArgs, skipWorktree, promptFile, nameOverride, config, noAsk);
+    const id = await launchAgent(input, mode, extraArgs, skipWorktree, promptFile, nameOverride, config, noAsk);
     if (id) launchedIds.push(id);
   }
 
   console.log();
 
   // For single interactive agent, attach to its session
-  if (!headless && launchedIds.length === 1 && !noAttach) {
+  if (mode === "interactive" && launchedIds.length === 1 && !noAttach) {
     log.info("Attaching to tmux session...");
     log.dim("  Detach with: Ctrl-B then D");
     console.log();
@@ -715,10 +782,92 @@ export async function cmdRun(
   }
 }
 
-export function cmdList(config: Config, brief = false): void {
-  ensureMultiplexer();
+interface RegisteredInvisibleAgent {
+  id: string;
+  worktree: string;
+  branch: string;
+  session: InvisibleSession;
+}
 
-  if (!tmuxHasSession()) {
+/** Dispatch-owned invisible sessions in this repository. Claude may also have
+ * unrelated background sessions; the registry plus marker is the ownership
+ * boundary that keeps those out of `dispatch list`. */
+function registeredInvisibleAgents(config: Config): RegisteredInvisibleAgent[] {
+  const root = gitRoot();
+  const sessionsByAgent = new Map<string, InvisibleSession[]>();
+  const out: RegisteredInvisibleAgent[] = [];
+  const candidates = readRegistry()
+    .filter((record) => record.repo === root)
+    .map((record) => ({
+      id: record.id,
+      worktree: record.worktree,
+      branch: record.branch,
+    }));
+  const seen = new Set(candidates.map((candidate) => candidate.worktree));
+
+  // Registry writes are deliberately non-fatal. Recover from a failed write
+  // by scanning this repository's dispatch worktrees for invisible markers.
+  const worktrees = join(root, config.worktreeDir);
+  try {
+    for (const entry of readdirSync(worktrees, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const worktree = join(worktrees, entry.name);
+      if (seen.has(worktree) || readAgentState(worktree).mode !== "invisible") continue;
+      seen.add(worktree);
+      candidates.push({
+        id: entry.name,
+        worktree,
+        branch:
+          execQuiet(`git -C "${worktree}" rev-parse --abbrev-ref HEAD`) || entry.name,
+      });
+    }
+  } catch {}
+
+  for (const record of candidates) {
+    const state = readAgentState(record.worktree);
+    if (state.mode !== "invisible") continue;
+    const adapter = getAdapter(state.agent || config.agent);
+    if (!adapter.invisible) continue;
+    let sessions = sessionsByAgent.get(adapter.kind);
+    if (!sessions) {
+      sessions = adapter.invisible.list();
+      sessionsByAgent.set(adapter.kind, sessions);
+    }
+    const session = findInvisibleSession(sessions, record.worktree, state.nativeId);
+    if (session) {
+      out.push({
+        id: record.id,
+        worktree: record.worktree,
+        branch: record.branch,
+        session,
+      });
+    }
+  }
+  return out;
+}
+
+function elapsedRuntime(startedAt: number): string {
+  if (!startedAt) return "";
+  const secs = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  return `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`;
+}
+
+function statusIcon(status: string): string {
+  if (/^(working|running|busy|starting)$/i.test(status)) return `${fmt.GREEN}●${fmt.NC}`;
+  if (/^(done|completed)$/i.test(status)) return `${fmt.BLUE}✓${fmt.NC}`;
+  if (/^(exited|failed|stopped)$/i.test(status)) return `${fmt.RED}●${fmt.NC}`;
+  return `${fmt.YELLOW}●${fmt.NC}`;
+}
+
+export function cmdList(config: Config, brief = false): void {
+  // Listing a runtime-owned session must not require installing tmux. Query
+  // the multiplexer only if it exists, and merge native sessions alongside it.
+  const lines = tmuxHasSession() ? tmuxListWindows() : "";
+  const nativeAgents = registeredInvisibleAgents(config);
+
+  if (!lines && nativeAgents.length === 0) {
     // No active sessions — but show recent completions if any
     const recent = getRecentCompletions(24);
     if (recent.length === 0) {
@@ -767,9 +916,6 @@ export function cmdList(config: Config, brief = false): void {
     return;
   }
 
-  const root = gitRoot();
-  const lines = tmuxListWindows();
-
   interface AgentInfo {
     name: string;
     status: string;
@@ -777,9 +923,33 @@ export function cmdList(config: Config, brief = false): void {
     runtime: string;
     lastLine: string;
     pr: string;
+    mode: RunMode;
   }
 
   const agents: AgentInfo[] = [];
+
+  for (const native of nativeAgents) {
+    let status = native.session.state;
+    let icon = statusIcon(status);
+    let lastLine = brief ? "" : native.session.name;
+    const declared = readDone(native.worktree);
+    if (declared) {
+      status = "done";
+      icon = `${fmt.BLUE}✓${fmt.NC}`;
+      if (!lastLine && declared.summary) lastLine = declared.summary.split("\n")[0].slice(0, 80);
+    }
+    if (lastLine.length > 80) lastLine = lastLine.slice(0, 77) + "...";
+    const pr = getPrInfo(native.branch);
+    agents.push({
+      name: native.id,
+      status,
+      statusIcon: icon,
+      runtime: elapsedRuntime(native.session.startedAt),
+      lastLine,
+      pr,
+      mode: "invisible",
+    });
+  }
 
   for (const line of lines.split("\n")) {
     if (!line) continue;
@@ -847,7 +1017,15 @@ export function cmdList(config: Config, brief = false): void {
       if (!lastLine && declared.summary) lastLine = declared.summary.split("\n")[0].slice(0, 80);
     }
 
-    agents.push({ name, status, statusIcon, runtime, lastLine, pr });
+    agents.push({
+      name,
+      status,
+      statusIcon,
+      runtime,
+      lastLine,
+      pr,
+      mode: readAgentState(path || worktreePath(name, config)).mode || "interactive",
+    });
   }
 
   // Get recent completions from history (agents no longer running)
@@ -858,7 +1036,7 @@ export function cmdList(config: Config, brief = false): void {
     // Compact format for MCP consumption
     for (const a of agents) {
       const prTag = a.pr ? `  ${a.pr}` : "";
-      console.log(`${a.statusIcon} ${a.name}  (${a.status})${a.runtime ? `  ${a.runtime}` : ""}${prTag}`);
+      console.log(`${a.statusIcon} ${a.name}  (${a.status}${a.mode === "invisible" ? ", invisible" : ""})${a.runtime ? `  ${a.runtime}` : ""}${prTag}`);
     }
     if (recent.length > 0) {
       console.log("");
@@ -885,7 +1063,7 @@ export function cmdList(config: Config, brief = false): void {
   for (const a of agents) {
     const prTag = a.pr ? `  ${fmt.BLUE}${a.pr}${fmt.NC}` : "";
     console.log(
-      `  ${a.statusIcon} ${fmt.BOLD}${a.name}${fmt.NC}  ${fmt.DIM}(${a.status})${fmt.NC}${a.runtime ? `  ${fmt.DIM}${a.runtime}${fmt.NC}` : ""}${prTag}`,
+      `  ${a.statusIcon} ${fmt.BOLD}${a.name}${fmt.NC}  ${fmt.DIM}(${a.status}${a.mode === "invisible" ? ", invisible" : ""})${fmt.NC}${a.runtime ? `  ${fmt.DIM}${a.runtime}${fmt.NC}` : ""}${prTag}`,
     );
     if (a.lastLine) {
       console.log(`    ${fmt.DIM}⤷ ${a.lastLine}${fmt.NC}`);
@@ -1027,8 +1205,12 @@ export function formatStatus(
 export function readAgentTrace(
   wtPath: string,
   agent: string,
-  opts: { mode?: "interactive" | "headless" | null; since?: number } = {},
+  opts: { mode?: RunMode | null; since?: number } = {},
 ): { parsed: AgentLogSummary; source: "log" | "session" } | null {
+  // Native invisible sessions are observed through the runtime. Reaching for
+  // a vendor transcript here would make screen-reading a hidden requirement
+  // of the mode this path exists to avoid.
+  if (opts.mode === "invisible") return null;
   const adapter = getAdapter(agent);
   // Floor-only harnesses intentionally make no promises about either log
   // format. Status callers retain their existing pane/history fallbacks.
@@ -1179,13 +1361,27 @@ export function cmdSend(args: string[], config: Config): void {
     process.exit(1);
   }
 
+  const wtPath = worktreePath(id, config);
+  const state = readAgentState(wtPath);
+
+  // Claude exposes launch, observe and attach for native background sessions,
+  // but no CLI operation that injects a message into one. Never report a send
+  // that disappeared, and never redirect it to a different transport silently.
+  if (state.mode === "invisible") {
+    const runtime = state.agent || config.agent;
+    log.error(`Agent '${id}' is an invisible ${runtime} session and cannot receive 'dispatch send'.`);
+    if (runtime === "claude") {
+      log.dim("  Claude has no CLI command for sending into a running background session.");
+    }
+    log.dim(`  Open it with: dispatch attach ${id}`);
+    log.dim("  Or post in a shared dispatch thread; its turn-end hook will fetch the post.");
+    process.exit(1);
+  }
+
   if (!sessionExists(id)) {
     log.error(`Agent '${id}' is not running. Use 'dispatch resume ${id}' first.`);
     process.exit(1);
   }
-
-  const wtPath = worktreePath(id, config);
-  const state = readAgentState(wtPath);
 
   // A headless agent reads its prompt from a file and never watches the pane.
   // Use the recorded mode: .dispatch.log is never deleted, so its presence
@@ -1275,10 +1471,34 @@ export function cmdStatus(args: string[], config: Config): void {
   }
 
   const wtPath = worktreePath(id, config);
+  const state = readAgentState(wtPath);
+  const invisible = state.mode === "invisible"
+    ? invisibleSessionForPath(wtPath, state.agent || config.agent)
+    : null;
 
   // Load history once for both state detection and final fallback
   const histSummaries = getAgentSummaries();
   const hist = histSummaries.find((s) => s.id === id);
+
+  if (state.mode === "invisible") {
+    if (!invisible && !hist) {
+      log.error(`Agent '${id}' not found`);
+      process.exit(1);
+    }
+    const status = invisible?.state || hist?.status || "unknown";
+    console.log();
+    console.log(`Agent: ${id}  (${status})`);
+    console.log("Mode: invisible");
+    if (invisible) {
+      console.log(`Native session: ${invisible.id}`);
+      if (invisible.name) console.log(`Work: ${invisible.name}`);
+    }
+    if (hist?.launchedAt) console.log(`Launched: ${new Date(hist.launchedAt).toLocaleString()}`);
+    const pr = getPrInfo(id);
+    if (pr) console.log(`PR: ${pr}`);
+    console.log();
+    return;
+  }
 
   // Determine agent state
   let agentStatus = "unknown";
@@ -1300,7 +1520,6 @@ export function cmdStatus(args: string[], config: Config): void {
     agentStatus = hist.status;
   }
 
-  const state = readAgentState(wtPath);
   const trace = readAgentTrace(wtPath, state.agent || config.agent, {
     mode: state.mode,
     since: hist?.launchedAt ? Date.parse(hist.launchedAt) : undefined,
@@ -1368,6 +1587,23 @@ export function cmdLogs(args: string[], config: Config): void {
   }
 
   const wtPath = worktreePath(id, config);
+  const state = readAgentState(wtPath);
+  if (state.mode === "invisible") {
+    const adapter = getAdapter(state.agent || config.agent);
+    const session = invisibleSessionForPath(wtPath, state.agent || config.agent);
+    if (!adapter.invisible || !session) {
+      log.error(`Invisible agent '${id}' is not running`);
+      process.exit(1);
+      return;
+    }
+    const result = adapter.invisible.logs(session.id);
+    if (result.status !== 0) {
+      log.error(result.stderr.trim() || `Could not read logs for invisible agent '${id}'`);
+      process.exit(1);
+    }
+    process.stdout.write(result.stdout);
+    return;
+  }
   const logFile = join(wtPath, ".dispatch.log");
 
   if (existsSync(logFile)) {
@@ -1393,6 +1629,26 @@ export function cmdStop(args: string[], config?: Config): void {
   if (!id) {
     log.error("Usage: dispatch stop <agent-id>");
     process.exit(1);
+  }
+
+  if (config) {
+    const wtPath = worktreePath(id, config);
+    const state = readAgentState(wtPath);
+    if (state.mode === "invisible") {
+      const adapter = getAdapter(state.agent || config.agent);
+      const session = invisibleSessionForPath(wtPath, state.agent || config.agent);
+      if (adapter.invisible && session) {
+        log.info(`Stopping invisible agent: ${id}`);
+        const result = adapter.invisible.stop(session.id);
+        if (result.status !== 0) {
+          log.error(result.stderr.trim() || `Could not stop invisible agent '${id}'`);
+          return;
+        }
+        recordEvent({ id, event: "stopped", ts: new Date().toISOString() });
+        log.ok(`Agent stopped: ${id}`);
+        return;
+      }
+    }
   }
 
   if (sessionExists(id)) {
@@ -1441,9 +1697,11 @@ export function cmdResume(args: string[], config: Config): void {
     process.exit(1);
   }
 
-  if (sessionExists(id)) {
+  const activeInvisible = invisibleSessionForId(id, config);
+  if (sessionExists(id) || activeInvisible) {
     log.warn(`Agent '${id}' is already running. Attaching...`);
-    tmuxAttach(id);
+    if (activeInvisible) cmdAttach([id], config);
+    else tmuxAttach(id);
     return;
   }
 
@@ -1539,7 +1797,7 @@ export function cmdCleanup(args: string[], config: Config): void {
     }
 
     for (const name of entries) {
-      if (sessionExists(name)) {
+      if (sessionExists(name) || invisibleSessionForId(name, config)) {
         cmdStop([name], config);
       } else {
         // Try closing cmux workspace even if sessionExists fails (e.g., outside cmux)
@@ -1558,7 +1816,7 @@ export function cmdCleanup(args: string[], config: Config): void {
       }
     }
   } else if (id) {
-    if (sessionExists(id)) {
+    if (sessionExists(id) || invisibleSessionForId(id, config)) {
       cmdStop([id], config);
     } else {
       tryCmuxCloseFromMarker(worktreePath(id, config));
@@ -1650,7 +1908,7 @@ export function cmdPrune(args: string[], config: Config): void {
   const skippedDirty: string[] = [];
   if (mergedOnly) log.info(`Checking ${entries.length} worktrees for merged PRs...`);
   for (const name of entries) {
-    const hasSession = sessionExists(name);
+    const hasSession = sessionExists(name) || invisibleSessionForId(name, config) !== null;
 
     // Never auto-remove a worktree with uncommitted changes. removeWorktree()
     // runs `git worktree remove --force`, which discards them with no warning
@@ -1722,7 +1980,7 @@ export function cmdPrune(args: string[], config: Config): void {
   }
 
   for (const { name } of stale) {
-    if (sessionExists(name)) {
+    if (sessionExists(name) || invisibleSessionForId(name, config)) {
       cmdStop([name], config);
     } else {
       tryCmuxCloseFromMarker(worktreePath(name, config));
@@ -1836,7 +2094,9 @@ export function cmdReap(args: string[], config: Config): void {
     return;
   }
 
-  const orphans = entries.filter((n) => !active.has(n));
+  const orphans = entries.filter(
+    (n) => !active.has(n) && !invisibleSessionForId(n, config),
+  );
 
   if (orphans.length === 0) {
     log.ok(
@@ -1975,7 +2235,25 @@ _${rows.length} agent(s) total_
   writeFileSync(dashPath, md);
 }
 
-export function cmdAttach(args: string[]): void {
+export function cmdAttach(args: string[], config: Config): void {
+  const id = args[0];
+  if (id) {
+    const wtPath = worktreePath(id, config);
+    const state = readAgentState(wtPath);
+    if (state.mode === "invisible") {
+      const adapter = getAdapter(state.agent || config.agent);
+      const session = invisibleSessionForPath(wtPath, state.agent || config.agent);
+      if (!adapter.invisible || !session) {
+        log.error(`Invisible agent '${id}' is not running`);
+        process.exit(1);
+        return;
+      }
+      const status = adapter.invisible.attach(session.id);
+      if (status !== 0) process.exit(status || 1);
+      return;
+    }
+  }
+
   ensureMultiplexer();
   if (!tmuxHasSession()) {
     log.error("No dispatch session running");
@@ -2195,7 +2473,7 @@ export function cmdTrackProgress(args: string[]): void {
 const CLAUDE_MD_SNIPPET = `
 ## Dispatch (multi-agent orchestration)
 
-Launch Claude Code agents in isolated git worktrees. Each agent gets its own branch, so it can make changes without affecting your working tree or other agents. Agents run inside tmux or cmux — interactive mode to watch/guide, headless for fire-and-forget.
+Launch coding agents in isolated git worktrees. Interactive and headless agents run inside tmux or cmux; invisible Claude agents are native background sessions with no pane at all.
 
 **Runtime and model.** The runtime comes from \`agent:\` in \`~/.dispatch.yml\` (default \`claude\`). Naming a model selects its runtime: \`--model opus\` runs claude, \`--model gpt-5.6-sol\` runs codex. Claude's default is Opus 5 with the 1M window (\`opus[1m]\`); do not use Sonnet unless asked. Quote model names containing brackets — \`--model 'opus[1m]'\` — or zsh will glob them.
 
@@ -2208,6 +2486,7 @@ Launch Claude Code agents in isolated git worktrees. Each agent gets its own bra
 dispatch run HEY-123                                  # From Linear ticket (auto-fetches title + description)
 dispatch run "Fix the auth bug" --name HEY-879        # Free text with custom branch name (hey-879)
 dispatch run HEY-123 --headless                       # Background — check with: dispatch logs HEY-123
+dispatch run HEY-123 --invisible                      # Real off-screen Claude session; attach later
 dispatch run HEY-123 --max-turns 20                   # Opus 5 with 20 turn limit
 dispatch run HEY-123 --agent codex                    # Run on Codex instead of Claude
 dispatch run HEY-123 HEY-124 HEY-125                 # Batch launch in parallel
@@ -2215,8 +2494,8 @@ dispatch run HEY-123 HEY-124 HEY-125                 # Batch launch in parallel
 # Monitor and interact
 dispatch list                                         # Status: green=running, yellow=idle, red=exited
 dispatch attach HEY-123                               # Jump to agent's terminal (auto-opens tab if no TTY)
-dispatch logs HEY-123                                 # Tail headless agent output
-dispatch status HEY-123                               # Structured trace (works for interactive too)
+dispatch logs HEY-123                                 # Show headless or invisible agent output
+dispatch status HEY-123                               # Trace or runtime-owned invisible state
 dispatch send HEY-123 "use the existing helper"       # Steer a running interactive agent
 
 # Lifecycle
@@ -2297,10 +2576,10 @@ dispatch thread post t-4f2a --from hey-837 \\
 
 **Three things stop a message loop**, none of which you have to think about: a post is never delivered back to its author; do-not-disturb holds delivery without losing the post; and a chain of replies stops being delivered after \`--max-hops\` (default 12) until a person posts, which starts a fresh chain.
 
-**Key flags:** \`--name/-n\` sets branch name, \`--agent/-A\` picks the runtime (\`claude\` default, or \`codex\`), \`--effort\` sets codex reasoning depth, \`--model/-m\` picks model (default: \`opus[1m]\`), \`--headless/-H\` for background, \`--prompt-file/-f\` for long prompts, \`--base/-b\` to branch off something other than dev, \`--ask\` to re-enable permission prompts.
+**Key flags:** \`--name/-n\` sets branch name, \`--agent/-A\` picks the runtime (\`claude\` default, or \`codex\`), \`--effort\` sets codex reasoning depth, \`--model/-m\` picks model (default: \`opus[1m]\`), \`--invisible\` starts a native off-screen Claude session, \`--headless/-H\` runs once, \`--prompt-file/-f\` handles long prompts, \`--base/-b\` selects the base, and \`--ask\` restores permission prompts. Codex has no stable native invisible mode; dispatch refuses it rather than substituting its experimental app-server or another launch mode.
 
 Config: \`~/.dispatch.yml\` (base_branch, agent, model, codex_model, reasoning_effort, max_turns, max_budget, permission_mode, worktree_dir, agent_timeout).
-Requires: tmux or cmux, the agent CLI (\`claude\` and/or \`codex\`), git.
+Requires: the agent CLI (\`claude\` and/or \`codex\`), git, and tmux or cmux for pane-backed modes. Invisible Claude sessions need no multiplexer.
 `;
 
 export function cmdSetup(): void {
@@ -3030,10 +3309,6 @@ export function reachability(
   id: string,
   config: Config,
 ): { ok: boolean; why: string; dnd: boolean } {
-  if (!sessionExists(id)) {
-    return { ok: false, why: `not running — nothing reaches it until 'dispatch resume ${id}'`, dnd: false };
-  }
-
   const wtPath = worktreePath(id, config);
 
   // Before liveness, so an agent that asked not to be interrupted is reported
@@ -3050,6 +3325,22 @@ export function reachability(
   }
 
   const state = readAgentState(wtPath);
+  if (state.mode === "invisible") {
+    const session = invisibleSessionForPath(wtPath, state.agent || config.agent);
+    if (!session) {
+      return { ok: false, why: `not running — nothing reaches it until 'dispatch resume ${id}'`, dnd: false };
+    }
+    return {
+      ok: false,
+      why: "invisible session — queued in the thread buffer for its turn-end hook",
+      dnd: false,
+    };
+  }
+
+  if (!sessionExists(id)) {
+    return { ok: false, why: `not running — nothing reaches it until 'dispatch resume ${id}'`, dnd: false };
+  }
+
   if (state.mode === "headless") {
     return { ok: false, why: "headless — it never reads its pane", dnd: false };
   }
@@ -3816,10 +4107,9 @@ export function cmdDone(args: string[], config: Config): void {
 
 export function cmdDirectory(args: string[], config: Config): void {
   const json = args.includes("--json");
-  // ensureMultiplexer announces the backend on stdout, which would sit in
-  // front of the JSON an agent is about to parse. Reading the directory needs
-  // no multiplexer to be started, only queried.
-  if (!json) ensureMultiplexer();
+  // Reading the directory only queries already-running backends. Starting a
+  // multiplexer here would make the command unusable for native invisible
+  // sessions on a machine that has neither tmux nor cmux.
   const entries = collectDirectory(config, args.includes("--all"));
   if (json) {
     console.log(directoryJson(entries));
@@ -3836,6 +4126,7 @@ export function cmdDirectory(args: string[], config: Config): void {
  *  keeps: the multiplexer's window list, the worktree, the history file and
  *  the thread buffers. Nothing here is a field anyone has to maintain. */
 function collectDirectory(config: Config, includeAll = false): DirectoryEntry[] {
+  const root = gitRoot();
   const threads = listThreads(threadsDir());
   const summaries = getAgentSummaries();
   const entries: DirectoryEntry[] = [];
@@ -3855,6 +4146,7 @@ function collectDirectory(config: Config, includeAll = false): DirectoryEntry[] 
   // them were open here with almost nothing running. A live process cwd'd in
   // the worktree is.
   const liveWorktrees = liveAgentWorktrees();
+  const nativeByWorktree = new Map<string, InvisibleSession>();
 
   // Which agents from other repositories are worth pulling in.
   //
@@ -3871,8 +4163,10 @@ function collectDirectory(config: Config, includeAll = false): DirectoryEntry[] 
   const conversing = new Set(threads.flatMap((t) => t.meta.members));
   for (const rec of readRegistry()) {
     if (seen.has(rec.id)) continue;
-    if (!liveWorktrees.has(rec.worktree)) continue;
-    if (!includeAll && !conversing.has(rec.id)) continue;
+    const native = invisibleSessionForPath(rec.worktree, config.agent);
+    if (!liveWorktrees.has(rec.worktree) && !native) continue;
+    if (!includeAll && rec.repo !== root && !conversing.has(rec.id)) continue;
+    if (native) nativeByWorktree.set(rec.worktree, native);
     seen.add(rec.id);
     // Same shape the multiplexer emits: name|pid|path|dead|created.
     lines.push(`${rec.id}||${rec.worktree}|0|`);
@@ -3884,15 +4178,25 @@ function collectDirectory(config: Config, includeAll = false): DirectoryEntry[] 
     if (!name || name === "dispatch") continue;
 
     const wtPath = path || worktreePath(name, config);
+    const marker = readAgentState(wtPath);
+    const native =
+      nativeByWorktree.get(wtPath) ||
+      (marker.mode === "invisible"
+        ? invisibleSessionForPath(wtPath, marker.agent || config.agent)
+        : null);
     const status: DirectoryEntry["status"] =
-      dead === "1"
+      native
+        ? /^(working|running|busy|starting)$/i.test(native.state)
+          ? "running"
+          : "idle"
+        : dead === "1"
         ? "exited"
         : pid && execQuiet(`pgrep -P ${pid}`) !== null
           ? "running"
           : "idle";
 
     const hist = summaries.find((s) => s.id === name);
-    const state = readAgentState(wtPath);
+    const state = marker;
     const trace = readAgentTrace(wtPath, state.agent || config.agent, {
       mode: state.mode,
       since: hist?.launchedAt ? Date.parse(hist.launchedAt) : undefined,
@@ -3905,7 +4209,19 @@ function collectDirectory(config: Config, includeAll = false): DirectoryEntry[] 
 
     const mine = threads.filter((t) => t.meta.members.includes(name));
     const dnd = readDnd(wtPath);
-    const reach = reachability(name, config);
+    const reach = native
+      ? dnd
+        ? {
+            ok: false,
+            why:
+              `do not disturb${dnd.reason ? `: ${dnd.reason}` : ""} — held in the buffer, ` +
+              `delivered on 'dispatch dnd ${name} off'`,
+          }
+        : {
+            ok: false,
+            why: "invisible session — queued in the thread buffer for its turn-end hook",
+          }
+      : reachability(name, config);
     // The declaration wins over anything inferred: an agent that says it is
     // finished is finished, whatever its pane looks like.
     const done = readDone(wtPath);
@@ -3913,7 +4229,23 @@ function collectDirectory(config: Config, includeAll = false): DirectoryEntry[] 
     // beats anything inferred from the pane. Kept behind the explicit `done`
     // declaration, which beats everything.
     const turnAdapter = getAdapter(state.agent || config.agent);
-    const turn = hasScreenReader(turnAdapter)
+    const turn = state.mode === "invisible"
+      ? native
+        ? {
+            state: /^(working|running|busy|starting)$/i.test(native.state)
+              ? ("working" as const)
+              : /^(blocked|idle|waiting)$/i.test(native.state)
+                ? ("waiting" as const)
+                : ("unknown" as const),
+            idleSeconds: -1,
+            evidence: `${turnAdapter.bin} agents --json state=${native.state}`,
+          }
+        : {
+            state: "unknown" as const,
+            idleSeconds: -1,
+            evidence: `${turnAdapter.bin} did not report the native background session`,
+          }
+      : hasScreenReader(turnAdapter)
       ? readTurnState(
           turnAdapter.findSessionFile(wtPath),
           state.agent || config.agent,

@@ -1,6 +1,6 @@
 # dispatch
 
-Multiplex coding agents from a single conversation. Fan out work across tickets, each agent opens in its own terminal tab on its own branch, then fold results back in when they're done.
+Multiplex coding agents from a single conversation. Fan out work across tickets, each on its own branch, then fold results back in when they're done. Agents can be visible, invisible-but-attachable, or one-shot headless runs.
 
 Agents run on **Claude Code** by default, or **Codex** with `--agent codex`. Every other command works the same either way.
 
@@ -37,7 +37,7 @@ npm link
 ### Requirements
 
 - Node.js 20+
-- `tmux` — `brew install tmux`
+- `tmux` or cmux for interactive/headless pane modes. Claude's `--invisible` mode needs neither.
 - An agent CLI — [`claude`](https://code.claude.com) and/or [`codex`](https://developers.openai.com/codex/cli). You only need the one you dispatch to.
 - `git` — for worktree management
 
@@ -112,6 +112,9 @@ dispatch run HEY-837 HEY-842 HEY-845
 # Headless (background, no tab)
 dispatch run HEY-837 --headless
 
+# Invisible (a real Claude session, kept off-screen and attachable later)
+dispatch run HEY-837 --invisible
+
 # With options
 dispatch run HEY-837 --model sonnet --max-turns 10 --base main
 
@@ -146,19 +149,24 @@ otherwise stops to ask whether it trusts the (brand new) worktree directory befo
 | Reasoning depth | not exposed | `--effort` / `reasoning_effort:` |
 | Resume | `claude --continue` | `codex resume --last` |
 | Headless | `claude -p --output-format stream-json` | `codex exec --json` |
+| Invisible | `claude --bg` | unsupported; app-server is experimental, so dispatch fails clearly |
 | `--max-turns` / `--max-budget` | supported | no equivalent, warns and ignores |
 | Instructions file | `CLAUDE.md` | `AGENTS.md` |
 
-The runtime is recorded in the worktree at launch, so `status`, `logs`, and `resume` keep driving
+The runtime and launch mode are recorded in the worktree, so `status`, `logs`, and `resume` keep driving
 the CLI the agent actually started with even if you change your config afterwards.
 
 ### Seeing what an agent is doing
 
-`dispatch status` returns a structured trace — turns, files changed, commits, recent actions, last
-output — for **both** modes. Headless agents tee a `.dispatch.log`; interactive agents write no log,
-so dispatch falls back to the agent CLI's own session transcript (`~/.claude/projects/...` or
-`~/.codex/sessions/...`), matched to the worktree. Same output shape either way, so an orchestrator
-does not need to know which harness an agent runs on.
+`dispatch status` returns a structured trace for pane-backed modes. For invisible Claude sessions it
+shows Claude's native background-session ID and its own `state` field instead of reverse-engineering
+liveness from a pane, process tree, or transcript. `dispatch logs` delegates to `claude logs`, and
+`dispatch attach <id>` delegates to `claude attach <native-id>`.
+
+Claude currently has no CLI command for sending a message into a running background session, so
+`dispatch send` fails clearly for invisible Claude agents and points to `dispatch attach` or a
+shared thread. Thread delivery still works: the same turn-end hook fetches owed posts from the
+buffer without typing into a pane.
 
 Codex routes shell work through a code-mode tool, so its traces show a coarser `Ran exec` where
 Claude resolves the actual command. Turns, files, commits and last message are reliable on both.
@@ -172,7 +180,7 @@ without asking. Use `--ask` when you'd rather approve those, or set `permission_
 ```bash
 dispatch list                  # All agents + status
 dispatch logs HEY-837          # Tail headless agent output
-dispatch attach HEY-837        # Jump to agent's terminal
+dispatch attach HEY-837        # Open the visible or invisible session
 ```
 
 ### Manage
@@ -191,20 +199,20 @@ dispatch run HEY-837
   │
   ├── 1. Fetch ticket from Linear (title + description)
   ├── 2. git worktree add -b hey-837 .worktrees/hey-837 origin/dev
-  ├── 3. Create tmux session → opens as terminal tab
-  ├── 4. Launch Claude Code with ticket as prompt
+  ├── 3. Choose pane-backed or native invisible runner
+  ├── 4. Launch the agent CLI with the turn-end hook installed
   │
   └── Agent works in isolated worktree, commits, pushes
 ```
 
-### Interactive vs Headless
+### Launch modes
 
-| | Interactive | Headless |
-|---|---|---|
-| **Terminal** | Named tab you can watch | Detached tmux session |
-| **Interaction** | You can type into Claude Code | Fire and forget |
-| **Output** | Live in the tab | `dispatch logs <id>` |
-| **Use case** | Complex tasks, review as you go | Simple/well-defined tasks |
+| | Interactive | Invisible | Headless |
+|---|---|---|---|
+| **Session** | Named pane you can watch | Native Claude background session | One-shot run in a detached pane |
+| **Interaction** | Type or `dispatch send` | `dispatch attach`; no direct send API | Fire and forget |
+| **Output** | Live in the pane | `dispatch logs <id>` | `dispatch logs <id>` |
+| **Use case** | Review as you go | Off-screen work you may inspect later | Simple bounded tasks |
 
 ## Scheduled runs (macOS)
 
