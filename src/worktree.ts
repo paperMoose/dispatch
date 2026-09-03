@@ -368,6 +368,17 @@ export interface GcOptions {
   rescued: boolean;
 }
 
+function parseOlderThan(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") {
+    throw new Error("--older-than requires a number of days");
+  }
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days < 0) {
+    throw new Error("--older-than must be a non-negative number of days");
+  }
+  return days;
+}
+
 export function parseGcOptions(args: string[]): GcOptions {
   let apply = false;
   let rescued = false;
@@ -382,22 +393,16 @@ export function parseGcOptions(args: string[]): GcOptions {
       rescued = true;
     } else if (arg === "--older-than") {
       const raw = args[++i];
-      if (raw === undefined) {
-        throw new Error("--older-than requires a number of days");
-      }
       olderThanSet = true;
-      olderThanDays = Number(raw);
+      olderThanDays = parseOlderThan(raw);
     } else if (arg.startsWith("--older-than=")) {
       olderThanSet = true;
-      olderThanDays = Number(arg.slice("--older-than=".length));
+      olderThanDays = parseOlderThan(arg.slice("--older-than=".length));
     } else {
       throw new Error(`Unknown gc option: ${arg}`);
     }
   }
 
-  if (!Number.isFinite(olderThanDays) || olderThanDays < 0) {
-    throw new Error("--older-than must be a non-negative number of days");
-  }
   if (rescued && (apply || olderThanSet)) {
     throw new Error("--rescued cannot be combined with collection options");
   }

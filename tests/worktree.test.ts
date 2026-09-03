@@ -98,6 +98,7 @@ describe("gc options", () => {
   });
 
   it("rejects unsafe or contradictory options", () => {
+    assert.throws(() => parseGcOptions(["--older-than", ""]));
     assert.throws(() => parseGcOptions(["--older-than", "-1"]));
     assert.throws(() => parseGcOptions(["--older-than", "nope"]));
     assert.throws(() => parseGcOptions(["--rescued", "--apply"]));
