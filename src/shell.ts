@@ -571,7 +571,10 @@ export function tmuxAttach(window?: string, explicit = true): void {
       cmuxSelectWorkspace(wsId);
       log.ok(`Focused cmux workspace: ${window}`);
     } else {
+      // Exit non-zero: this printed an error, and a script that reads only the
+      // status code was being told the attach succeeded.
       log.error(`cmux workspace not found for agent: ${window}`);
+      process.exit(1);
     }
     return;
   }

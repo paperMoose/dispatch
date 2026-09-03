@@ -3621,8 +3621,14 @@ export function cmdThread(args: string[], config: Config): void {
     const idOverride = take("--id");
     const maxHopsArg = take("--max-hops");
     const members = rest.filter((a) => !a.startsWith("--"));
-    if (members.length < 1) {
-      log.error('Usage: dispatch thread new <agent-id> [<agent-id>...] [--topic "..."]');
+    // Two, not one. A thread is a buffer several agents confer in, so a
+    // single-member one has nobody to confer with: it reported success, did
+    // nothing, and left a file behind.
+    if (members.length < 2) {
+      if (members.length === 1) {
+        log.error(`A thread needs at least two members; '${members[0]}' would be talking to itself.`);
+      }
+      log.error('Usage: dispatch thread new <agent-id> <agent-id> [...] [--topic "..."]');
       process.exit(1);
     }
     if (idOverride && !isValidThreadId(idOverride)) {

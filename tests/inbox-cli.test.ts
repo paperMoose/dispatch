@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -71,5 +71,32 @@ describe("the hook never fails", { skip }, () => {
     const r = run();
     assert.equal(r.status, 0);
     assert.equal(r.stdout, "", "a hook that speaks every turn gets turned off");
+  });
+});
+
+describe("thread new refuses a buffer nobody can confer in", { skip }, () => {
+  // Found by a breadth sweep of every command with bogus input, not by any
+  // test. `dispatch thread new onlyonemember` printed a green success, made a
+  // thread with one member, and left the file behind. A thread is a shared
+  // buffer several agents confer in; one member is not several.
+  //
+  // Checked at the CLI rather than in createThread: five existing tests build
+  // single-member threads as fixtures for delivery and hop behaviour, and
+  // editing them to fit this change would be fixing the test to suit the code.
+  // The bug is what a person can type, so that is where it is refused.
+  const run = (...args: string[]) =>
+    spawnSync("node", [CLI, "thread", "new", ...args], { encoding: "utf-8" });
+
+  it("exits non-zero and says why for a single member", () => {
+    const r = run("solo-agent-does-not-exist");
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout + r.stderr, /talking to itself|at least two/i);
+  });
+
+  it("creates nothing when it refuses", () => {
+    const before = existsSync(DIR) ? readdirSync(DIR).length : 0;
+    run("solo-agent-does-not-exist");
+    const after = existsSync(DIR) ? readdirSync(DIR).length : 0;
+    assert.equal(after, before, "a refused thread must not leave a file behind");
   });
 });
