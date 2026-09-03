@@ -100,3 +100,33 @@ after it is small.
 Answer question 1 the same way: capture what dispatch can actually observe when
 a session cap is reached. Screen-matching is the wrong answer for the same
 reason it was wrong for readiness.
+
+
+## Proof that Claude Code accepts a vaulted credential (2026-09-03)
+
+`claude auth status` was not enough evidence and should not have been treated
+as any. It reads a file and checks an expiry locally; it can report
+`loggedIn: true` for a token the API would refuse. Three things were checked
+directly instead.
+
+**A real model call.** With `CLAUDE_CONFIG_DIR` pointed at a directory built
+entirely by `useAccount`, `claude -p` returned the requested word and exited 0.
+That is the only evidence that matters, and it is the one that had been
+skipped.
+
+**The turn-end hook still fires there.** This is the interaction between the
+two features built the same day, and the failure would have been silent: an
+agent moved to a second account that quietly stopped receiving thread posts.
+A project-level `Stop` hook fired under an isolated config dir and its
+injection reached the model.
+
+**Identity resolves on first use.** Immediately after `useAccount`, status
+reported `email: null` and `orgId: null`, which looked like a gap. It is not:
+both populate once a real call has been made, and afterwards match the default
+configuration exactly. Worth knowing so it is not chased again.
+
+### What is still unproven
+
+Everything above used **one** account, Ryan's own. Nothing has yet shown two
+*different* logins side by side, which is the entire point. That needs a second
+account registered, and it is the next thing to verify rather than assume.
