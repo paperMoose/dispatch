@@ -121,3 +121,92 @@ But two cheap things are worth doing while it is fresh:
 If a native backend does turn out to fit, the payoff is large: no tmux, no
 cmux, no readiness detection, no pane at all, and the liveness problem solved
 by the runtime rather than by us.
+
+---
+
+# What dispatch is actually for, and what that implies
+
+Added after Ryan set out the constraints: dispatch must launch both visible and
+invisible agents, must clean up worktrees reliably, and must work with **every**
+agent harness rather than only Claude and Codex.
+
+## The three asks are one change
+
+### Measured: most of a harness adapter exists only to read a screen
+
+| Adapter | Total | Screen and transcript reverse-engineering |
+|---|---|---|
+| `claudeAdapter` | 178 lines | ~126 (**70%**) |
+| `codexAdapter` | 275 lines | ~222 (**80%**) |
+
+`AgentAdapter` has 13 methods. Roughly eight of them exist only because dispatch
+drives a text UI through a terminal and has to work out what is on the screen:
+`paneCmd`, `isReady`, `isBusy`, `dismissStartupDialog`, `shellPrefix`,
+`findSessionFile`, `parseSession`, `parseLog`.
+
+That is the barrier to a third harness. Not the launching, which is a line. The
+screen-reading, which is a research project per harness, and the part that broke
+twice in one day: `isReady` matched only a startup banner, so agents got *less*
+reachable the more work they had done.
+
+### "Invisible rather than headless" removes exactly that code
+
+What Ryan described — not headless, just not shown, still a real session you can
+open later — already exists:
+
+```
+claude --bg          start it, invisible
+claude attach <id>   open it when you want to look
+claude logs <id>     see what it has been doing
+```
+
+An agent with no visible pane has no screen to read. So `isReady`, `isBusy`,
+`dismissStartupDialog` and `paneCmd` stop being needed, and `state` comes from
+`claude agents --json` instead of from `parseSession`.
+
+**A new harness would need about five things instead of thirteen:** what the
+binary is called, how to launch it, how to make it run something when a turn
+ends, how to resume it, and optionally how to read its log.
+
+### Hooks are the one thing the ecosystem already agrees on
+
+cmux ships hook integrations for seventeen harnesses:
+
+> codex, grok, opencode, pi, omp, campfire, amp, cursor, gemini, kiro,
+> antigravity, rovodev, hermes-agent, copilot, codebuddy, factory, qoder
+
+So "make it run something when a turn ends" is not a bet on an unusual feature.
+It is the closest thing this ecosystem has to a standard, and dispatch already
+depends on it for thread delivery as of 0.15.0.
+
+## What stays dispatch's own
+
+Worth being explicit, because it is what survives whatever the harnesses grow
+next. None of them do any of this:
+
+- **Worktree lifecycle.** Create one per agent off the right base, keep agents
+  out of each other's way, remove it after, delete the branch only if merged.
+- **Refusing to destroy work.** Bulk and automatic cleanup already skip
+  worktrees with uncommitted changes rather than forcing them, and a merged
+  branch with dirty state is kept. That is the behaviour people would be upset
+  to lose, and it is already right.
+- **Coordination between agents.** Threads, the directory, do-not-disturb,
+  `dispatch done`.
+- **One vocabulary across harnesses.** `dispatch list` meaning the same thing
+  whether an agent is Claude, Codex, or something not written yet.
+
+## The order this suggests
+
+1. **Answer the one open question:** can a running background session be sent a
+   message? If yes, invisible mode is a complete backend. If no, it is a
+   launcher and the pane path stays for `dispatch send`.
+2. **Add invisible as a third launch mode**, alongside headless and
+   interactive. Small, and it is what Ryan actually wants day to day.
+3. **Then split `AgentAdapter`**: a small required core every harness must
+   implement, and the screen-reading half as optional, needed only by harnesses
+   run in a visible pane.
+4. Multiplexer seam after that, on whatever is left of it.
+
+Note the reordering. The harness axis is the one Ryan asked to open, and it is
+also where the measured cost is. The multiplexer seam was drafted first because
+it looked untidiest, which is not the same as mattering most.
