@@ -21,6 +21,7 @@ import {
   formatDirectory,
   readDnd,
   setDnd,
+  prMeansFinished,
   type DirectoryEntry,
 } from "../src/directory.js";
 
@@ -257,5 +258,39 @@ describe("the directory an agent reads", () => {
   it("tells a reader what to do when nothing is running", () => {
     assert.ok(formatDirectory([], PLAIN).includes("dispatch run"));
     assert.equal(directoryJson([]), "[]");
+  });
+});
+
+
+describe("a merged pull request means the work is over", () => {
+  // Ryan hit this: two agents he had to work out were finished by checking
+  // GitHub himself, because dispatch listed them as running. "Running" was
+  // only ever describing the terminal being alive. Measured on one repository:
+  // 18 agents had merged pull requests and 10 were marked done, so a dozen
+  // finished agents sat in the list looking busy.
+  it("treats MERGED as finished", () => {
+    assert.equal(prMeansFinished("#8792 MERGED"), true);
+  });
+
+  it("does not treat CLOSED as finished", () => {
+    // Abandoned or superseded is not the same as done, and reporting it as
+    // success would hide work that never landed.
+    assert.equal(prMeansFinished("#8941 CLOSED"), false);
+  });
+
+  it("does not treat an open pull request as finished", () => {
+    assert.equal(prMeansFinished("#9104 OPEN"), false);
+  });
+
+  it("says no when there is no pull request at all", () => {
+    assert.equal(prMeansFinished(""), false);
+    assert.equal(prMeansFinished(undefined), false);
+    assert.equal(prMeansFinished(null), false);
+  });
+
+  it("does not match a branch that merely contains the word", () => {
+    // The check is on the state field, not free text; a title mentioning
+    // "merged" must not mark an open pull request finished.
+    assert.equal(prMeansFinished("#1 OPEN unmerged-cleanup"), false);
   });
 });

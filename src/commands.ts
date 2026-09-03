@@ -121,6 +121,7 @@ import {
   formatDirectory,
   directoryJson,
   type DirectoryEntry,
+  prMeansFinished,
 } from "./directory.js";
 import { parseCmuxWorkspaces, loadCmuxWorkspaceId } from "./cmux.js";
 export { cmdGc } from "./worktree.js";
@@ -1015,6 +1016,19 @@ export function cmdList(config: Config, brief = false): void {
       statusIcon = `${fmt.BLUE}✓${fmt.NC}`;
       status = "done";
       if (!lastLine && declared.summary) lastLine = declared.summary.split("\n")[0].slice(0, 80);
+    } else if (prMeansFinished(pr)) {
+      // A merged pull request is objective evidence the work is finished, and
+      // dispatch already had it: `list` printed "MERGED" on the same line while
+      // still filing the agent under "Running Agents". Measured on noah-server
+      // before this: 18 agents had merged pull requests and only 10 were marked
+      // done, so a dozen finished agents sat in the list looking busy. "Running"
+      // was only ever describing the terminal, not the work.
+      //
+      // Ranked below a declaration on purpose: `dispatch done` carries a summary
+      // and a handoff, which a merge status cannot.
+      statusIcon = `${fmt.BLUE}✓${fmt.NC}`;
+      status = "done";
+      if (!lastLine) lastLine = "pull request merged; nothing left to do";
     }
 
     agents.push({
@@ -1068,6 +1082,22 @@ export function cmdList(config: Config, brief = false): void {
     if (a.lastLine) {
       console.log(`    ${fmt.DIM}⤷ ${a.lastLine}${fmt.NC}`);
     }
+  }
+
+  // Finished agents are the ones a person has to act on, and they are easy to
+  // miss in a list of thirty. Name them once at the end with the command that
+  // clears them, rather than leaving them to be spotted a line at a time.
+  const finished = agents.filter((a) => a.status === "done");
+  if (finished.length) {
+    console.log();
+    console.log(
+      `${fmt.BLUE}✓${fmt.NC} ${fmt.BOLD}${finished.length} finished${fmt.NC} ${fmt.DIM}(idle shells now, safe to clear)${fmt.NC}`,
+    );
+    console.log(`  ${fmt.DIM}${finished.map((a) => a.name).join(", ")}${fmt.NC}`);
+    console.log(
+      `  ${fmt.DIM}dispatch cleanup ${finished[0].name} --delete-branch${fmt.NC}` +
+        `${finished.length > 1 ? `  ${fmt.DIM}(or dispatch gc)${fmt.NC}` : ""}`,
+    );
   }
 
   if (recent.length > 0) {

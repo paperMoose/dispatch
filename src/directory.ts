@@ -270,3 +270,18 @@ export function formatDirectory(
   );
   return out.join("\n");
 }
+
+
+/** Whether a pull request line means the work is over.
+ *
+ *  `list` fetches this string already (`"#8792 MERGED"`) and printed it beside
+ *  agents it was simultaneously filing under "Running Agents". Measured on one
+ *  repository before this existed: 18 agents had merged pull requests and only
+ *  10 were marked done, so a dozen finished agents looked busy. "Running" was
+ *  describing the terminal, not the work.
+ *
+ *  MERGED only. A CLOSED pull request means abandoned or superseded, which is
+ *  not the same as finished and should not be reported as success. */
+export function prMeansFinished(pr: string | undefined | null): boolean {
+  return !!pr && /\bMERGED\b/.test(pr);
+}
