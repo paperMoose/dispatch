@@ -2,7 +2,7 @@ import { execSync, spawnSync, spawn, type ChildProcess } from "child_process";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync } from "fs";
 import { join, basename, dirname } from "path";
 import type { Config } from "./config.js";
-import { getAdapter, type AgentAdapter } from "./agents.js";
+import { getAdapter, hasScreenReader, type AgentAdapter } from "./agents.js";
 import {
   isCmuxAvailable,
   cmuxNewWorkspace,
@@ -891,6 +891,13 @@ export function waitForAgent(
   timeout: number,
   adapter: AgentAdapter = getAdapter("claude"),
 ): boolean {
+  // A floor-only harness has no screen contract to wait on. Its launch still
+  // proceeds; process checks remain available to later callers.
+  if (!hasScreenReader(adapter)) {
+    log.dim(`  ${adapter.bin} has no screen reader; skipping the readiness check`);
+    return true;
+  }
+
   if (useCmux()) {
     const wsId = getCmuxWorkspaceId(id);
     if (wsId) cmuxSetStatus(wsId, "dispatch", "initializing", { color: "#F18F01" });

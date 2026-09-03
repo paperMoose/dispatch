@@ -6,6 +6,7 @@ import { randomBytes } from "crypto";
 import { type Config } from "./config.js";
 import {
   getAdapter,
+  hasScreenReader,
   resolveRuntime,
   isAgentKind,
   REASONING_EFFORTS,
@@ -251,7 +252,8 @@ function promptNotSent(
  *  which left every headless codex agent showing blank activity. */
 function lastAgentText(logContent: string, agent: string): string {
   try {
-    return getAdapter(agent).parseLog(logContent).lastText;
+    const adapter = getAdapter(agent);
+    return hasScreenReader(adapter) ? adapter.parseLog(logContent).lastText : "";
   } catch {
     return "";
   }
@@ -1028,6 +1030,10 @@ export function readAgentTrace(
   opts: { mode?: "interactive" | "headless" | null; since?: number } = {},
 ): { parsed: AgentLogSummary; source: "log" | "session" } | null {
   const adapter = getAdapter(agent);
+  // Floor-only harnesses intentionally make no promises about either log
+  // format. Status callers retain their existing pane/history fallbacks.
+  if (!hasScreenReader(adapter)) return null;
+
   const logFile = join(wtPath, ".dispatch.log");
 
   const fromLog = (): { parsed: AgentLogSummary; source: "log" } | null => {
@@ -1203,34 +1209,40 @@ export function cmdSend(args: string[], config: Config): void {
     process.exit(1);
   }
 
-  const screen = tmuxCapture(id, 40);
+  if (hasScreenReader(adapter)) {
+    const screen = tmuxCapture(id, 40);
 
-  // The process check cannot identify the pane on cmux, so require the TUI to
-  // actually be painted before typing anything into it — unless the pane could
-  // not be read at all, which is a different thing from an empty one. See
-  // reachability(): an unreadable capture used to block every send on this
-  // machine even though the agent was plainly alive.
-  const unreadable = !screen.trim();
-  if (unreadable) {
-    log.warn(`Could not read ${id}'s screen; sending on the strength of its live ${adapter.bin} process.`);
-  } else if (adapter.dismissStartupDialog(screen)) {
-    // Named before the generic case, and before typing: a modal swallows text
-    // and reads Enter as answering it, so a message here would confirm a trust
-    // prompt instead of reaching anyone. Saying which dialog is the difference
-    // between relaunching the agent and debugging the wrong layer for an hour.
-    log.error(`${id} is blocked on ${adapter.bin}'s startup dialog and has never started.`);
-    log.dim("  It never received its prompt either.");
-    log.dim(`  Relaunch on dispatch 0.12.2+, which answers it, or: dispatch attach ${id}`);
-    process.exit(1);
-  } else if (!adapter.isReady(screen) && !adapter.isBusy(screen)) {
-    log.error(`No ${adapter.bin} TUI in ${id}, so nothing was sent.`);
-    log.dim(`  Last line on its screen: ${lastScreenLine(screen)}`);
-    log.dim(`  Check it first: dispatch attach ${id}`);
-    process.exit(1);
-  }
+    // The process check cannot identify the pane on cmux, so require the TUI to
+    // actually be painted before typing anything into it — unless the pane could
+    // not be read at all, which is a different thing from an empty one. See
+    // reachability(): an unreadable capture used to block every send on this
+    // machine even though the agent was plainly alive.
+    const unreadable = !screen.trim();
+    if (unreadable) {
+      log.warn(`Could not read ${id}'s screen; sending on the strength of its live ${adapter.bin} process.`);
+    } else if (adapter.dismissStartupDialog(screen)) {
+      // Named before the generic case, and before typing: a modal swallows text
+      // and reads Enter as answering it, so a message here would confirm a trust
+      // prompt instead of reaching anyone. Saying which dialog is the difference
+      // between relaunching the agent and debugging the wrong layer for an hour.
+      log.error(`${id} is blocked on ${adapter.bin}'s startup dialog and has never started.`);
+      log.dim("  It never received its prompt either.");
+      log.dim(`  Relaunch on dispatch 0.12.2+, which answers it, or: dispatch attach ${id}`);
+      process.exit(1);
+    } else if (!adapter.isReady(screen) && !adapter.isBusy(screen)) {
+      log.error(`No ${adapter.bin} TUI in ${id}, so nothing was sent.`);
+      log.dim(`  Last line on its screen: ${lastScreenLine(screen)}`);
+      log.dim(`  Check it first: dispatch attach ${id}`);
+      process.exit(1);
+    }
 
-  if (adapter.isBusy(screen)) {
-    log.warn(`${adapter.bin} is mid-turn; the message will queue until it finishes`);
+    if (adapter.isBusy(screen)) {
+      log.warn(`${adapter.bin} is mid-turn; the message will queue until it finishes`);
+    }
+  } else {
+    log.warn(
+      `${adapter.bin} has no screen reader; sending on the strength of its live process.`,
+    );
   }
 
   // Do-not-disturb holds back agent-to-agent thread posts, not this: a person
@@ -3051,6 +3063,13 @@ export function reachability(
   if (!agentProcessAlive(wtPath, adapter.bin, id)) {
     return { ok: false, why: "no live agent process — its pane is sitting at a shell", dnd: false };
   }
+
+  // Without the optional screen capability, the live harness process is the
+  // strongest available evidence and is sufficient for delivery.
+  if (!hasScreenReader(adapter)) {
+    return { ok: true, why: "", dnd: false };
+  }
+
   const screen = tmuxCapture(id, 40);
 
   // A screen we could not read is not a screen with nothing on it.
@@ -3893,10 +3912,17 @@ function collectDirectory(config: Config, includeAll = false): DirectoryEntry[] 
     // The transcript is the agent's own record of what it was doing, so it
     // beats anything inferred from the pane. Kept behind the explicit `done`
     // declaration, which beats everything.
-    const turn = readTurnState(
-      getAdapter(state.agent || config.agent).findSessionFile(wtPath),
-      state.agent || config.agent,
-    );
+    const turnAdapter = getAdapter(state.agent || config.agent);
+    const turn = hasScreenReader(turnAdapter)
+      ? readTurnState(
+          turnAdapter.findSessionFile(wtPath),
+          state.agent || config.agent,
+        )
+      : {
+          state: "unknown" as const,
+          idleSeconds: -1,
+          evidence: "adapter does not provide session transcripts",
+        };
     const lifecycle: DirectoryEntry["state"] = done
       ? "done"
       : status === "exited"
