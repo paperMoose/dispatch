@@ -115,6 +115,7 @@ import {
   type DirectoryEntry,
 } from "./directory.js";
 import { parseCmuxWorkspaces, loadCmuxWorkspaceId } from "./cmux.js";
+export { cmdGc } from "./worktree.js";
 import {
   cmuxSend,
   cmuxSendKey,

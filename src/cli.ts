@@ -29,6 +29,7 @@ import {
   cmdDirectory,
   cmdDnd,
   cmdDone,
+  cmdGc,
 } from "./commands.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -217,6 +218,9 @@ async function main(): Promise<void> {
       break;
     case "reap":
       cmdReap(rest, config);
+      break;
+    case "gc":
+      cmdGc(rest, config);
       break;
     case "dashboard":
       cmdDashboard(config);
