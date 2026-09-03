@@ -16,7 +16,7 @@ const cli = readFileSync(join(process.cwd(), "src", "cli.ts"), "utf-8");
  *  command that IS documented, not an undocumented feature. */
 const ALIASES = new Set([
   "-h", "-v", "--help", "--version", "help", "version",
-  "ls", "dir", "threads", "search", "setup", "dashboard",
+  "ls", "dir", "threads", "search", "setup", "dashboard", "accounts",
 ]);
 
 function switchCommands(): string[] {

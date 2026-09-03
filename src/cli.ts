@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import {
+  cmdAccount,
   cmdRun,
   cmdList,
   cmdLogs,
@@ -78,6 +79,8 @@ Commands:
                                            Remove worktrees whose cmux tab has been closed
   dispatch doctor                          Check the setup and say what to fix. Non-zero
                                            exit when something is broken
+  dispatch account <sub>                   Several Claude logins, so an agent that hits a
+                                           usage limit can carry on (list | add | remove)
   dispatch history [N]                     Show past agent runs (default: last 20)
   dispatch find <query>                    Search across all agent terminal content
   dispatch attach <id>                     Open an interactive or invisible session
@@ -263,6 +266,11 @@ async function main(): Promise<void> {
     case "send":
       cmdSend(rest, config);
       break;
+    case "account":
+    case "accounts":
+      cmdAccount(args.slice(1), config);
+      break;
+
     case "thread":
     case "threads":
       cmdThread(rest, config);

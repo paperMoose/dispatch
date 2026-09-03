@@ -106,6 +106,7 @@ import {
   type ThreadPost,
 } from "./threads.js";
 import { collectInbox, inboxBody, hookJson, deliveredIds } from "./inbox.js";
+import { addAccount, listAccounts, removeAccount } from "./accounts.js";
 import { writeHookScript } from "./turnhook.js";
 import { readTurnState, type TurnState } from "./turnstate.js";
 import { recordAgent, readRegistry } from "./registry.js";
@@ -3621,6 +3622,100 @@ export const LAUNCH_BRIEFING =
   "When you do reply, send what you ran and what you saw:\n" +
   '  dispatch thread post <thread-id> --replay "the command you ran" "what it showed"\n' +
   "A claim nobody can check is one the others have to take on trust, so carry the command that shows it.";
+
+
+/** Several Claude accounts, so a limited agent can move to another one.
+ *
+ *  Registering a second account deliberately does NOT touch the login the
+ *  person is using: they log into it in a staging directory, and dispatch
+ *  copies the credential out. Logging out of the main account to register
+ *  another would be a rude thing for a tool to require. */
+export function cmdAccount(args: string[], _config: Config): void {
+  const sub = args[0];
+  const rest = args.slice(1);
+
+  if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
+    console.log(`dispatch account — several Claude logins, so a limited agent can keep working
+
+Subcommands:
+  list                      Accounts dispatch can cycle between
+  add <name> [--from <dir>] Store a login. Without --from, takes the one you are
+                            using now. With it, takes the login from a staging
+                            directory, leaving your current one untouched.
+  remove <name>             Forget an account
+
+Registering a second account without logging yourself out:
+
+  CLAUDE_CONFIG_DIR=~/.dispatch/staging claude auth login   # log into account two
+  dispatch account add personal --from ~/.dispatch/staging
+  rm -rf ~/.dispatch/staging                                # the credential is vaulted now
+
+Until at least one account is registered, nothing changes: agents launch
+against ~/.claude exactly as they always have.`);
+    return;
+  }
+
+  if (sub === "list") {
+    const accounts = listAccounts();
+    if (!accounts.length) {
+      log.info("No accounts registered. Agents use ~/.claude as usual.");
+      log.dim("  Register one with: dispatch account add <name>");
+      return;
+    }
+    console.log(`${fmt.BOLD}Accounts${fmt.NC}`);
+    for (const a of accounts) {
+      console.log(`  ${fmt.GREEN}●${fmt.NC} ${fmt.BOLD}${a.name}${fmt.NC}`);
+    }
+    return;
+  }
+
+  if (sub === "add") {
+    const name = rest.find((a) => !a.startsWith("--"));
+    const fromIdx = rest.indexOf("--from");
+    const from = fromIdx === -1 ? join(homedir(), ".claude") : rest[fromIdx + 1];
+    if (!name) {
+      log.error("Usage: dispatch account add <name> [--from <config-dir>]");
+      process.exit(1);
+    }
+    if (!from) {
+      log.error("--from needs a directory");
+      process.exit(1);
+    }
+    try {
+      addAccount(name, from);
+      log.ok(`Stored account '${name}'`);
+      log.dim(`  from: ${from}`);
+      const total = listAccounts().length;
+      if (total === 1) {
+        log.dim("  One account registered. Add a second before cycling can do anything.");
+      } else {
+        log.dim(`  ${total} accounts; a limited agent can now move between them.`);
+      }
+    } catch (e) {
+      log.error((e as Error).message);
+      log.dim("  To register a second account without logging yourself out:");
+      log.dim("    CLAUDE_CONFIG_DIR=~/.dispatch/staging claude auth login");
+      log.dim("    dispatch account add <name> --from ~/.dispatch/staging");
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (sub === "remove") {
+    const name = rest[0];
+    if (!name) {
+      log.error("Usage: dispatch account remove <name>");
+      process.exit(1);
+    }
+    if (removeAccount(name)) log.ok(`Forgot account '${name}'`);
+    else log.warn(`No account named '${name}'`);
+    return;
+  }
+
+  log.error(`Unknown account command: ${sub}`);
+  log.dim("  list | add | remove");
+  process.exit(1);
+}
 
 export function cmdThread(args: string[], config: Config): void {
   const sub = args[0];
