@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
 // Agent runtimes
 //
-// dispatch drives a coding-agent CLI inside a tmux/cmux pane. Everything that
-// differs between those CLIs lives behind AgentAdapter: launch lines, TUI
-// readiness markers, and log parsing. The rest of the codebase should never
-// name a specific CLI.
+// Everything required to launch a coding-agent CLI lives behind AgentAdapter.
+// Pane and transcript inspection are a separate, optional capability: a
+// harness can participate in dispatch without knowing how to read a TUI or a
+// vendor-specific session format.
 // ---------------------------------------------------------------------------
 import {
   closeSync,
@@ -21,7 +21,8 @@ import { basename, join } from "path";
 import { codexHookArgs, installClaudeHook } from "./turnhook.js";
 import { modelFlag, permissionModeFlag, type Config } from "./config.js";
 
-export type AgentKind = "claude" | "codex";
+export type BuiltInAgentKind = "claude" | "codex";
+export type AgentKind = string;
 
 export const AGENT_KINDS: AgentKind[] = ["claude", "codex"];
 
@@ -48,13 +49,13 @@ function shellQuote(value: string): string {
  *  in the config, `-m opus` silently becomes `codex -m opus`. Codex answers
  *  that with a 400 the instant the prompt arrives, and the agent looks like it
  *  simply never started. Catch the mismatch before launching. */
-const MODEL_OWNERS: { pattern: RegExp; runtime: AgentKind }[] = [
+const MODEL_OWNERS: { pattern: RegExp; runtime: BuiltInAgentKind }[] = [
   { pattern: /^(opus|sonnet|haiku)\b|^claude[-.]/i, runtime: "claude" },
   { pattern: /^(gpt|o[0-9]|codex)[-.]?/i, runtime: "codex" },
 ];
 
 /** The runtime a model name belongs to, or null when it is not recognisable. */
-export function modelRuntime(model: string): AgentKind | null {
+export function modelRuntime(model: string): BuiltInAgentKind | null {
   for (const { pattern, runtime } of MODEL_OWNERS) {
     if (pattern.test(model.trim())) return runtime;
   }
@@ -66,7 +67,7 @@ export interface RuntimeChoice {
   /** Runtime to launch. Unchanged unless the model selected a different one. */
   agent: string;
   /** Set when the model changed the runtime, for reporting to the operator. */
-  switchedTo?: AgentKind;
+  switchedTo?: BuiltInAgentKind;
   /** Set when the request cannot be satisfied; the caller should not launch. */
   error?: string;
 }
@@ -119,7 +120,7 @@ export interface AgentLogSummary {
 export type RunMode = "interactive" | "headless";
 
 export interface AgentAdapter {
-  kind: AgentKind;
+  kind: string;
 
   /** Executable name, as it appears in a pane's echoed launch command. */
   bin: string;
@@ -163,7 +164,11 @@ export interface AgentAdapter {
 
   /** Prepended to both launch lines (e.g. `unset CLAUDECODE && `). */
   shellPrefix: string;
+}
 
+/** Optional support for inspecting a visible pane and vendor transcripts.
+ *  Harnesses that only launch and resume agents do not need this capability. */
+export interface ScreenReadingAdapter {
   /** Pane content shows the TUI is rendered and accepting input. */
   isReady(content: string): boolean;
 
@@ -185,6 +190,23 @@ export interface AgentAdapter {
   /** Parse that session transcript. Its shape differs from the headless
    *  stream, so it gets its own parser. */
   parseSession(content: string): AgentLogSummary;
+}
+
+export type ScreenReadingAgentAdapter = AgentAdapter & ScreenReadingAdapter;
+
+/** Whether an adapter supplies the complete optional screen-reading half. */
+export function hasScreenReader(
+  adapter: AgentAdapter,
+): adapter is ScreenReadingAgentAdapter {
+  const candidate = adapter as AgentAdapter & Partial<ScreenReadingAdapter>;
+  return (
+    typeof candidate.isReady === "function" &&
+    typeof candidate.isBusy === "function" &&
+    typeof candidate.dismissStartupDialog === "function" &&
+    typeof candidate.findSessionFile === "function" &&
+    typeof candidate.parseSession === "function" &&
+    typeof candidate.parseLog === "function"
+  );
 }
 
 /** Newest-first files under `dir`, recursing at most `depth` levels. Used to
@@ -372,7 +394,7 @@ function sessionCwdMatches(
 // ---------------------------------------------------------------------------
 // Claude Code
 // ---------------------------------------------------------------------------
-const claudeAdapter: AgentAdapter = {
+const claudeAdapter: ScreenReadingAgentAdapter = {
   kind: "claude",
   bin: "claude",
   modelKey: "model",
@@ -619,7 +641,7 @@ function codexEffortFlag(config: Config): string {
   return `-c ${shellQuote(`model_reasoning_effort=${config.reasoningEffort}`)}`;
 }
 
-const codexAdapter: AgentAdapter = {
+const codexAdapter: ScreenReadingAgentAdapter = {
   kind: "codex",
   bin: "codex",
   modelKey: "codexModel",
@@ -898,19 +920,34 @@ const codexAdapter: AgentAdapter = {
 
 // ---------------------------------------------------------------------------
 
-const ADAPTERS: Record<AgentKind, AgentAdapter> = {
+const ADAPTERS: Record<string, AgentAdapter> = {
   claude: claudeAdapter,
   codex: codexAdapter,
 };
 
-export const DEFAULT_AGENT: AgentKind = "claude";
+export const DEFAULT_AGENT: BuiltInAgentKind = "claude";
 
-export function getAdapter(kind?: AgentKind | string): AgentAdapter {
+/** Register a harness adapter. The required floor is sufficient; adapters
+ *  that also implement ScreenReadingAdapter automatically take the richer
+ *  pane and transcript paths at their call sites. */
+export function registerAdapter(adapter: AgentAdapter): void {
+  if (!adapter.kind.trim()) throw new Error("Agent runtime kind cannot be empty");
+  if (ADAPTERS[adapter.kind]) {
+    throw new Error(`Agent runtime already registered: ${adapter.kind}`);
+  }
+  ADAPTERS[adapter.kind] = adapter;
+  if (!AGENT_KINDS.includes(adapter.kind)) AGENT_KINDS.push(adapter.kind);
+}
+
+export function getAdapter(): ScreenReadingAgentAdapter;
+export function getAdapter(kind: BuiltInAgentKind): ScreenReadingAgentAdapter;
+export function getAdapter(kind?: string): AgentAdapter;
+export function getAdapter(kind?: string): AgentAdapter {
   // Unset means "not configured" rather than "misconfigured": configs written
   // before codex support, and worktrees with no runtime marker, land here.
   if (!kind) return ADAPTERS[DEFAULT_AGENT];
 
-  const adapter = ADAPTERS[kind as AgentKind];
+  const adapter = ADAPTERS[kind];
   if (!adapter) {
     throw new Error(
       `Unknown agent runtime: ${kind}. Expected one of: ${AGENT_KINDS.join(", ")}`,
