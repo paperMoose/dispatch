@@ -90,3 +90,22 @@ export function resetsIn(limit: QuotaLimit, nowMs: number = Date.now()): string 
   if (secs < 86400) return `${Math.round(secs / 3600)}h`;
   return `${Math.round(secs / 86400)}d`;
 }
+
+/** Whether an agent is limited **right now**, which is the only question a
+ *  caller actually has.
+ *
+ *  `findQuotaRejection` answers "did this ever happen", and that is a trap: a
+ *  rejection stays in the transcript forever, so the newest one is still there
+ *  days after it reset. Found by running detection over a real transcript and
+ *  getting a hit from a weekly limit that had already expired — cycling on
+ *  that would have moved a perfectly healthy agent to another account.
+ *
+ *  Returns the live limit, or null when there is none or it has passed. */
+export function currentlyLimited(
+  lines: string[],
+  nowMs: number = Date.now(),
+): QuotaLimit | null {
+  const hit = findQuotaRejection(lines);
+  if (!hit) return null;
+  return limitIsOver(hit, nowMs) ? null : hit;
+}

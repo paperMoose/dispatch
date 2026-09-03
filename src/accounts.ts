@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, copyFileSync, statSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, statSync } from "fs";
+import { spawnSync } from "child_process";
 import { homedir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 
 /** Several Claude accounts, and moving an agent between them.
  *
@@ -23,9 +24,14 @@ export function accountsDir(): string {
   return join(homedir(), ".dispatch", "accounts");
 }
 
-/** Where one agent's isolated config lives, for its whole life. */
-export function agentConfigDir(agentId: string): string {
-  return join(homedir(), ".dispatch", "agent-config", agentId);
+/** Where one agent's isolated config lives, for its whole life.
+ *
+ *  `base` is injectable so tests do not write into a person's real
+ *  ~/.dispatch. An earlier version did exactly that and left eighteen
+ *  directories behind, which is the same mistake the integration tests made
+ *  with the threads directory. */
+export function agentConfigDir(agentId: string, base = join(homedir(), ".dispatch")): string {
+  return join(base, "agent-config", agentId);
 }
 
 const CREDENTIALS = ".credentials.json";
@@ -72,20 +78,68 @@ export function accountsConfigured(dir = accountsDir()): boolean {
  *
  *  Copied rather than moved: the account the person is logged into stays
  *  logged in. Mode 0600 because this is a live credential. */
+/** Does this text actually carry a usable token?
+ *
+ *  The check that would have saved an afternoon. `~/.claude/.credentials.json`
+ *  exists on this machine and its oauth object is EMPTY: a husk left behind
+ *  when the real credential moved to the macOS keychain. Copying it produced a
+ *  vault entry that looked fine and authenticated as `loggedIn: false`. */
+export function hasToken(raw: string): boolean {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const oauth = (parsed.claudeAiOauth as Record<string, unknown>) ?? parsed;
+    const token = oauth?.accessToken;
+    return typeof token === "string" && token.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** The live credential for a config directory, from wherever it really lives.
+ *
+ *  On macOS the default configuration keeps its credential in the keychain,
+ *  not in the file, and the file is left behind empty. An isolated
+ *  CLAUDE_CONFIG_DIR has no keychain entry and does read the file, which is
+ *  why writing one there works. Both were verified directly: the keychain
+ *  value written into an isolated directory authenticates. */
+export function readLiveCredential(configDir: string): string | null {
+  try {
+    const raw = readFileSync(join(configDir, CREDENTIALS), "utf-8");
+    if (hasToken(raw)) return raw;
+  } catch {
+    // fall through to the keychain
+  }
+  // The keychain belongs to the DEFAULT configuration only. An isolated
+  // CLAUDE_CONFIG_DIR has no keychain entry of its own, so consulting it for
+  // one would quietly hand back the default account no matter which directory
+  // was asked about, and every vaulted account would be the same login. Caught
+  // by two tests that expected a refusal and got a credential.
+  const isDefault = resolve(configDir) === resolve(join(homedir(), ".claude"));
+  if (isDefault && process.platform === "darwin") {
+    const r = spawnSync(
+      "security",
+      ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    if (r.status === 0 && r.stdout && hasToken(r.stdout)) return r.stdout.trim();
+  }
+  return null;
+}
+
 export function addAccount(name: string, sourceConfigDir: string, dir = accountsDir()): string {
-  const src = join(sourceConfigDir, CREDENTIALS);
-  if (!existsSync(src)) {
+  const credential = readLiveCredential(sourceConfigDir);
+  if (!credential) {
     throw new Error(
-      `No ${CREDENTIALS} in ${sourceConfigDir}. Log in there first, then add it.`,
+      `No usable credential for ${sourceConfigDir}. Log in there first, then add it.`,
     );
   }
   const target = join(dir, name);
   mkdirSync(target, { recursive: true, mode: 0o700 });
   const dest = join(target, CREDENTIALS);
-  copyFileSync(src, dest);
-  // chmod, not writeFileSync's mode option: that only applies when the file is
-  // created, so copying a loosely-permissioned source left a live credential
-  // group- and world-readable. Caught by a test, not by review.
+  writeFileSync(dest, credential.endsWith("\n") ? credential : credential + "\n", { mode: 0o600 });
+  // chmod as well as the mode option: the option only applies when the file is
+  // created, so re-adding an account over an existing entry would keep the old
+  // permissions. Caught by a test, not by review.
   chmodSync(dest, 0o600);
   return dest;
 }
@@ -98,8 +152,8 @@ export function removeAccount(name: string, dir = accountsDir()): boolean {
 }
 
 /** Which account an agent is currently on, or null. */
-export function currentAccount(agentId: string): string | null {
-  const marker = join(agentConfigDir(agentId), ".dispatch-account");
+export function currentAccount(agentId: string, base = join(homedir(), ".dispatch")): string | null {
+  const marker = join(agentConfigDir(agentId, base), ".dispatch-account");
   try {
     return readFileSync(marker, "utf-8").trim() || null;
   } catch {
@@ -116,8 +170,9 @@ export function useAccount(
   agentId: string,
   account: Account,
   sharedFrom = join(homedir(), ".claude"),
+  base = join(homedir(), ".dispatch"),
 ): string {
-  const dir = agentConfigDir(agentId);
+  const dir = agentConfigDir(agentId, base);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
 
   for (const entry of SHARED_CONFIG) {

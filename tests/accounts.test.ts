@@ -17,6 +17,7 @@ import {
   accountsConfigured,
   listAccounts,
   nextAccount,
+  hasToken,
   removeAccount,
   useAccount,
   type Account,
@@ -27,6 +28,15 @@ const tmp = (what: string) => mkdtempSync(join(tmpdir(), `dispatch-acct-${what}-
 function loggedInDir(token = "tok-a"): string {
   const d = tmp("src");
   writeFileSync(join(d, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: token } }));
+  return d;
+}
+
+/** A credentials file that exists and carries nothing. This is not invented:
+ *  it is the exact shape of ~/.claude/.credentials.json on this machine, a
+ *  husk left behind when the real credential moved into the macOS keychain. */
+function huskDir(): string {
+  const d = tmp("husk");
+  writeFileSync(join(d, ".credentials.json"), JSON.stringify({ claudeAiOauth: {} }));
   return d;
 }
 
@@ -76,7 +86,7 @@ describe("pointing an agent at an account", () => {
     const vault = tmp("v"); const shared = tmp("shared");
     addAccount("one", loggedInDir("tok-one"), vault);
     const acct = listAccounts(vault)[0];
-    const dir = useAccount(`a-${Date.now()}`, acct, shared);
+    const dir = useAccount("a", acct, shared, tmp("base"));
     assert.match(readFileSync(join(dir, ".credentials.json"), "utf-8"), /tok-one/);
     assert.equal(readFileSync(join(dir, ".dispatch-account"), "utf-8").trim(), "one");
   });
@@ -86,7 +96,7 @@ describe("pointing an agent at an account", () => {
     writeFileSync(join(shared, "CLAUDE.md"), "# my instructions");
     mkdirSync(join(shared, "skills"));
     addAccount("two", loggedInDir(), vault);
-    const dir = useAccount(`b-${Date.now()}`, listAccounts(vault)[0], shared);
+    const dir = useAccount("b", listAccounts(vault)[0], shared, tmp("base"));
     assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf-8"), "# my instructions");
     assert.ok(existsSync(join(dir, "skills")));
   });
@@ -106,12 +116,13 @@ describe("pointing an agent at an account", () => {
     addAccount("first", loggedInDir("tok-1"), vault);
     addAccount("second", loggedInDir("tok-2"), vault);
     const [a, b] = listAccounts(vault);
-    const id = `c-${Date.now()}`;
-    const dir = useAccount(id, a, shared);
+    const id = "c";
+    const base = tmp("base");
+    const dir = useAccount(id, a, shared, base);
     mkdirSync(join(dir, "projects"), { recursive: true });
     writeFileSync(join(dir, "projects", "history.txt"), "a conversation");
 
-    const again = useAccount(id, b, shared);
+    const again = useAccount(id, b, shared, base);
     assert.equal(again, dir, "the directory must not move");
     assert.match(readFileSync(join(dir, ".credentials.json"), "utf-8"), /tok-2/);
     assert.equal(readFileSync(join(dir, "projects", "history.txt"), "utf-8"), "a conversation");
@@ -151,5 +162,30 @@ describe("choosing where to go next", () => {
 
   it("says nothing when there are no accounts at all", () => {
     assert.equal(nextAccount([], null), null);
+  });
+});
+
+describe("a credential file that carries nothing", () => {
+  // The bug that made "piece two is done" false. ~/.claude/.credentials.json
+  // exists on this machine with an EMPTY oauth object, because the real
+  // credential lives in the macOS keychain. Copying the file produced a vault
+  // entry that looked correct and authenticated as loggedIn: false. Verified
+  // directly against `claude auth status` before and after the fix.
+  it("is not mistaken for a login", () => {
+    assert.equal(hasToken(JSON.stringify({ claudeAiOauth: {} })), false);
+    assert.equal(hasToken(JSON.stringify({ claudeAiOauth: { accessToken: "" } })), false);
+    assert.equal(hasToken("not json"), false);
+    assert.equal(hasToken(JSON.stringify({ claudeAiOauth: { accessToken: "abc" } })), true);
+  });
+
+  it("accepts a credential stored without the oauth wrapper", () => {
+    // The keychain value is the inner object, not the wrapped one.
+    assert.equal(hasToken(JSON.stringify({ accessToken: "abc", refreshToken: "d" })), true);
+  });
+
+  it("refuses to vault a husk rather than storing a dead account", () => {
+    // Storing it would fail later, mid-cycle, which is the worst moment to
+    // discover an account was never usable.
+    assert.throws(() => addAccount("dead", huskDir(), tmp("v-husk")), /no usable credential/i);
   });
 });

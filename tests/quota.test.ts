@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  currentlyLimited,
   findQuotaRejection,
   limitIsOver,
   parseQuotaRejection,
@@ -103,5 +104,36 @@ describe("knowing when an account is usable again", () => {
     assert.equal(resetsIn(limit, (limit.resetsAt - 90) * 1000), "2m");
     assert.equal(resetsIn(limit, (limit.resetsAt - 7200) * 1000), "2h");
     assert.equal(resetsIn(limit, (limit.resetsAt + 60) * 1000), "now");
+  });
+});
+
+describe("limited now, versus limited once", () => {
+  // The distinction that matters, and the one I nearly shipped without.
+  // Running detection over a real transcript returned a weekly limit from two
+  // days earlier that had already reset. Cycling on that would have moved a
+  // healthy agent to another account for no reason.
+  const rejection = (resetsAt: number, kind = "five_hour") =>
+    JSON.stringify({ quotaLimits: { status: "rejected", resetsAt, rateLimitType: kind } });
+
+  it("says nothing when the newest rejection has already reset", () => {
+    const past = Math.floor(Date.now() / 1000) - 86_400;
+    assert.equal(currentlyLimited([rejection(past)]), null);
+  });
+
+  it("reports a limit that has not reset yet", () => {
+    const soon = Math.floor(Date.now() / 1000) + 3600;
+    const hit = currentlyLimited([rejection(soon)])!;
+    assert.equal(hit.resetsAt, soon);
+  });
+
+  it("uses the newest rejection, so a fresh limit after an old one still counts", () => {
+    const past = Math.floor(Date.now() / 1000) - 86_400;
+    const soon = Math.floor(Date.now() / 1000) + 3600;
+    const hit = currentlyLimited([rejection(past), rejection(soon, "seven_day")])!;
+    assert.equal(hit.kind, "seven_day");
+  });
+
+  it("stays quiet for a transcript that never hit one", () => {
+    assert.equal(currentlyLimited(['{"type":"assistant"}']), null);
   });
 });
