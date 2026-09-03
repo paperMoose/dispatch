@@ -63,8 +63,40 @@ account, so one rate limit.
    limits are better. Failover may matter far less there. Worth checking
    before building anything symmetrical.
 
+## Question 2, answered 2026-09-02. It is a small feature.
+
+Two measurements settle it.
+
+**Session history follows the config dir.** A run under an isolated
+`CLAUDE_CONFIG_DIR` created its own `projects/`, `sessions/` and
+`session-env/` there. So swapping the config dir mid-run *does* orphan the
+conversation, and per-agent config dirs are the wrong shape for failover.
+
+**The credential is a file inside that dir.** With a dummy
+`.credentials.json` placed in an otherwise-empty config dir,
+`claude auth status` reported `loggedIn: true`. The binary reads
+`.credentials.json` from the config dir; the macOS keychain entry is not the
+only path. (The probe used an obviously invalid token and the directory was
+deleted immediately. Never copy a real credential to a temp location to test
+this.)
+
+Put together, the design is the opposite of what was proposed above:
+
+> **Keep one config dir per agent for its whole life, and swap only
+> `.credentials.json` inside it when a limit is hit.**
+
+History never moves, so nothing is orphaned. The swap is one file write. The
+running process will not notice a changed file, so the sequence is: detect the
+limit, replace the credential, `dispatch resume`. Resume already reinstalls the
+turn-end hook, verified live on 2026-09-02, so a failed-over agent keeps
+receiving thread posts.
+
+That leaves exactly one hard problem: **detecting the limit** (question 1),
+which still needs a real limit being hit, captured as a fixture. Everything
+after it is small.
+
 ## Before any code
 
-Question 2 decides whether this is a small feature or a redesign. Answer it
-first, the same way Gate 0 was answered first: cheapest experiment that can
-invalidate the design.
+Answer question 1 the same way: capture what dispatch can actually observe when
+a session cap is reached. Screen-matching is the wrong answer for the same
+reason it was wrong for readiness.
