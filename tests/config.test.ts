@@ -153,7 +153,11 @@ describe("loadConfig", () => {
     }
 
     try {
-      const config = loadConfig();
+      // repoRoot: null disables the repository layer. Without it this test
+      // reads whatever .dispatch.yml the checkout happens to carry, so it
+      // asserted "defaults" while actually measuring this repo's config, and
+      // went red the moment dispatch's own repo grew one.
+      const config = loadConfig(undefined, { repoRoot: null });
       assert.equal(config.baseBranch, "dev");
       assert.equal(config.model, "opus[1m]");
       assert.equal(config.maxTurns, "");
@@ -176,7 +180,7 @@ describe("loadConfig", () => {
     process.env.DISPATCH_CONFIG = "/nonexistent/.dispatch.yml";
 
     try {
-      const config = loadConfig({ model: "opus", baseBranch: "main" });
+      const config = loadConfig({ model: "opus", baseBranch: "main" }, { repoRoot: null });
       assert.equal(config.model, "opus");
       assert.equal(config.baseBranch, "main");
     } finally {

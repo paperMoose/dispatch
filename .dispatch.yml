@@ -1,0 +1,2 @@
+# Dispatch branches from main in this repository; the global default is dev.
+base_branch: main
