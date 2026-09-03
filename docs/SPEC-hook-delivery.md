@@ -299,3 +299,45 @@ The first Codex attempt hung with the hook never firing. Cause: `codex` on PATH
 is a cmux shim that injects its own `-c hooks.Stop=...`, which collided with the
 one under test. `CMUX_CODEX_HOOKS_DISABLED=1` bypasses it. Any future Codex hook
 test needs that, or it is measuring cmux rather than dispatch.
+
+## Walkthrough: a real dispatched agent
+
+Run 2026-09-02. Not a probe. `dispatch run` from end to end, nothing wired by
+hand.
+
+Seeded a thread owing a post to `hooklive`, then launched:
+
+```
+dispatch run "Reply with the single word READY..." --name hooklive --headless
+```
+
+Dispatch created the worktree, installed `.dispatch-inbox-hook.sh` into it
+pointing at the right worktree and the right dispatch binary, and launched
+Codex with the hook flags. The buffer afterwards:
+
+```
+POST  lv1       orchestrator  hops=0   "what is 6 times 7?"
+DELIV lv1       delivered=[]            undelivered=['hooklive']
+DELIV lv1       delivered=['hooklive']  undelivered=[]
+POST  75a29952  hooklive      hops=1   "42"   replay="python3 -c 'print(6 * 7)'"
+DELIV 75a29952  delivered=[] undelivered=['orchestrator']
+```
+
+The agent then wrote `.dispatch-done` and exited. Nothing was typed into its
+pane at any point.
+
+Note the replay: the agent supplied a command that genuinely reproduces its
+answer, unprompted. That is the behaviour the placeholder fix was for, holding
+up outside the run it was fixed in.
+
+### The bug this run's review caught first
+
+Reviewing the seam before this run found that `interactiveAgentCmd` took no
+extra args, so interactive Codex agents got no hook at all. Claude was
+unaffected because its hook is a settings file rather than a flag, which is
+exactly why testing only Claude would have missed it, and Codex is the default
+agent. Fixed, with three tests confirmed red against the old code.
+
+Worth recording: `tsup` does not typecheck. The first version of that fix built
+cleanly with `hookArgs` undefined in `cmdResume`. `tsc --noEmit` caught it and
+the build did not.

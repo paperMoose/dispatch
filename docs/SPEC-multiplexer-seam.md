@@ -138,14 +138,54 @@ Keeping these out is what stops the interface sprawling to 40 methods.
 
 Step 2 is the bulk. Step 3 is small once the seam exists.
 
-## Open questions
+## Answers to the open questions
 
-1. **Does a plugin ship as a node module, a directory of scripts, or a
-   subprocess speaking a protocol?** A subprocess is the only option that lets
-   someone write a backend in another language, and it is also the only one
-   where a misbehaving plugin cannot take the process down. It costs a round
-   trip per call, which matters for `capture` in a poll loop.
-2. **Is `dispatch dashboard` allowed to stay cmux-only**, or does it become a
-   capability a plugin can implement?
-3. **How much does a plugin get to see?** The agent id and worktree path are
-   unavoidable. Thread contents are not, and should not be handed over.
+Recommendations, not decisions. Each is argued from something measured.
+
+### 1. Plugin shape: a subprocess, but as one more adapter, not a parallel system
+
+Ship the interface with tmux and cmux in-process first. Then add a single
+`SubprocessAdapter` that implements `MultiplexerAdapter` by shelling out to a
+child. A plugin is then not a second architecture; it is one implementation of
+the same interface, and if nobody ever writes one we have lost nothing.
+
+Subprocess over node module, because it is the only shape that is
+language-agnostic and the only one where a bad plugin cannot take dispatch
+down with it.
+
+**Keep the interface synchronous.** This is the load-bearing call, because
+sync-now-async-later is a breaking change across all 25 call sites. The usual
+argument for async is subprocess round trips, and the numbers say it does not
+matter here: process spawn floor is 1.6ms p50 and 3.2ms p99 (Gate 0, same
+machine). A plugin doing real work lands somewhere around 5-20ms per call. The
+only hot path is `capture` inside readiness polling, which runs on a interval
+measured in hundreds of milliseconds. Paying 20ms there is not worth making
+dispatch's entire call graph async.
+
+If profiling ever contradicts that, a long-lived child speaking a line protocol
+brings it under a millisecond without changing the interface.
+
+### 2. `dashboard` becomes a capability, and it has to
+
+Not a preference. If `dispatch dashboard` keeps its `if (!useCmux())`, then a
+`useCmux()` survives the extraction and the refactor did not achieve its
+purpose. Every remaining backend conditional has to become either a core method
+or an optional capability, or the seam leaks by construction.
+
+### 3. What a plugin sees: the pane, and that is genuinely a lot
+
+Unavoidable: the agent id, the worktree path, and **every byte written to the
+pane**. `sendText` is how the launch command and the prompt get in, so a
+multiplexer plugin necessarily sees the brief an agent was given. That should
+be stated plainly to anyone installing one rather than discovered.
+
+What it does not see, and this falls out of the hook work: **thread traffic**.
+Delivery is a hook reading a file inside the agent's own process, so posts
+never cross the multiplexer at all.
+
+The exception is the pane-typing fallback, which does push post text through
+`sendText`. So the fallback is not only uglier, it is also the one path that
+exposes thread contents to a backend plugin. That is a second argument for
+removing it once the hook path has been trusted in real use for a while.
+
+Out of scope entirely: config, credentials, other agents' worktrees.
