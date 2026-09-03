@@ -1,7 +1,12 @@
 # Spec: pluggable agent runtimes (Claude Code + Codex)
 
-Status: draft, ready to build
+Status: **delivered in 0.9.0.** Kept for the reasoning, not as pending work.
 Target version: dispatch 0.9.0
+
+Superseded by `SPEC-restructure.md`, which reverses this document's non-goal of
+"a third runtime": the harness is now meant to be pluggable, and 0.16.0 split
+`AgentAdapter` into a required floor and an optional screen-reading half to make
+that possible. The locked decisions below still hold; the scope no longer does.
 
 ## Goal
 
