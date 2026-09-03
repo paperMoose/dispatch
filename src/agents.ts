@@ -155,7 +155,11 @@ export interface AgentAdapter {
    *  the worktree and returns nothing; Codex takes its hook config as flags
    *  and persists none of it. Both were proven end to end before this existed.
    */
-  installTurnEndHook(wtPath: string, hookScript: string): string;
+  installTurnEndHook(
+    wtPath: string,
+    hookScript: string,
+    env?: { hookTrustAlreadyBypassed?: boolean },
+  ): string;
 
   /** Prepended to both launch lines (e.g. `unset CLAUDECODE && `). */
   shellPrefix: string;
@@ -673,8 +677,8 @@ const codexAdapter: AgentAdapter = {
     return parts.join(" ");
   },
 
-  installTurnEndHook(_wtPath, hookScript) {
-    return codexHookArgs(hookScript);
+  installTurnEndHook(_wtPath, hookScript, env) {
+    return codexHookArgs(hookScript, env?.hookTrustAlreadyBypassed ?? false);
   },
 
   shellPrefix: "",

@@ -112,7 +112,15 @@ export function installClaudeHook(wtPath: string, scriptPath: string): void {
  *  ask. The flag is narrow in scope here: the hook it authorises is a script
  *  dispatch just wrote, in a worktree dispatch just created, running the same
  *  dispatch binary. cmux's own Codex integration does the same thing. */
-export function codexHookArgs(scriptPath: string): string {
+export function codexHookArgs(scriptPath: string, trustAlreadyBypassed = false): string {
   const entry = `[{hooks=[{type="command",command="${scriptPath}",timeout=15000}]}]`;
-  return `--enable hooks --dangerously-bypass-hook-trust -c 'hooks.Stop=${entry}'`;
+  // Codex rejects a repeated --dangerously-bypass-hook-trust outright:
+  //   error: the argument '--dangerously-bypass-hook-trust' cannot be used
+  //   multiple times
+  // and refuses to start at all. Under cmux the codex on PATH is a wrapper
+  // that already passes it, so adding our own kills every launch. Measured:
+  // omitting it there still works, because --enable is repeatable and cmux
+  // prepends its own -c while ours is appended, so ours wins on last-write.
+  const trust = trustAlreadyBypassed ? "" : " --dangerously-bypass-hook-trust";
+  return `--enable hooks${trust} -c 'hooks.Stop=${entry}'`;
 }

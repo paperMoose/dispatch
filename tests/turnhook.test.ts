@@ -159,6 +159,26 @@ describe("Codex launch flags", () => {
     assert.ok(codexHookArgs("/wt/h.sh").includes("--dangerously-bypass-hook-trust"));
   });
 
+  it("does not repeat the trust flag when a wrapper already passed it", () => {
+    // Codex rejects a repeated --dangerously-bypass-hook-trust and refuses to
+    // start. Under cmux the codex on PATH is a wrapper that already passes it,
+    // so supplying our own killed every interactive Codex launch:
+    //   error: the argument '--dangerously-bypass-hook-trust' cannot be used
+    //   multiple times
+    // Found by dispatching an agent to work on dispatch, not by any test.
+    const args = codexHookArgs("/wt/h.sh", true);
+    assert.ok(!args.includes("--dangerously-bypass-hook-trust"), args);
+    assert.ok(args.includes("--enable hooks"), "hooks must still be enabled");
+    assert.ok(args.includes("hooks.Stop="), "our hook must still be installed");
+  });
+
+  it("never emits the trust flag twice in one launch line", () => {
+    for (const bypassed of [true, false]) {
+      const n = codexHookArgs("/wt/h.sh", bypassed).split("--dangerously-bypass-hook-trust").length - 1;
+      assert.ok(n <= 1, `emitted the flag ${n} times`);
+    }
+  });
+
   it("gives the hook a timeout in the milliseconds Codex expects", () => {
     // Codex takes milliseconds here and Claude takes seconds. A 15 that meant
     // 15ms would kill the hook on a cold start every time.

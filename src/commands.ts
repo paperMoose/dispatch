@@ -218,7 +218,12 @@ export function installTurnEndHook(wtPath: string, config: Config): string {
   const cli = process.argv[1];
   if (!cli) throw new Error("cannot resolve the running dispatch binary");
   const script = writeHookScript(wtPath, process.execPath, cli);
-  return getAdapter(config.agent).installTurnEndHook(wtPath, script);
+  // Under cmux the agent's PATH carries a codex wrapper that already passes
+  // --dangerously-bypass-hook-trust, and codex refuses to start if it is given
+  // twice. Nothing is typed differently; we just stop supplying it ourselves.
+  return getAdapter(config.agent).installTurnEndHook(wtPath, script, {
+    hookTrustAlreadyBypassed: useCmux(),
+  });
 }
 
 /** The TUI never came up, so the pane is most likely a live shell. Pasting the
